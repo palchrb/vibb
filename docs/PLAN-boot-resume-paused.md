@@ -554,27 +554,187 @@ from "A: play here" to "No speakers answered here" (owner follow-up
 heals itself the moment the box is back on a network where someone
 answers.
 
-## Stage B — NOT BUILT: follow the coordinator mid-session, group volume
+## Stage B — reviewed 2026-08-23 (architect + QA, two rounds): READY TO IMPLEMENT
 
-What stage A deliberately leaves: if someone REGROUPS in the Sonos app
-while our session plays, our chosen uid can become a group MEMBER. The
-sidecar already detects it (`grouped_away` + `coordinator` in the aux,
-`sonosd.py` ~590; daemon surfaces `renderer_state: "grouped-away"`) but
-nothing acts on it.
+The original sketch ("follow the coordinator for verbs/poll/play, plus
+group volume") was put through an adversarial round and is DEAD in that
+form. The owner then supplied the real use case, and a second focused
+round produced the design below. Three scenarios, three different
+answers — the sketch's mistake was conflating them.
 
-- **Follow, don't fight:** when grouped_away, the sidecar should target
-  the COORDINATOR for transport verbs, /play pushes and the poll's
-  track/position reads — one seam (an "effective speaker" resolve).
-  Trap: a member's AVTransport reports `x-rincon:<coordinator>` as its
-  uri, not the track — the `ours` check must read the coordinator or it
-  logs not-ours forever. Trap: pushing DIDL to a member RIPS it out of
-  the group. This is field-hardened poller/verb code — architect + QA
-  round before building, same rule as Part 2.
-- **Group volume:** when grouped, the volume card should drive
-  GroupRenderingControl (SetGroupVolume) on the coordinator, or the kid
-  turns one room only.
-- Group create/dissolve stays OUT (owner): the two verbs are trivial
-  (join = SetAVTransportURI x-rincon:<coord>; leave =
-  BecomeCoordinatorOfStandaloneGroup) and belong in the PWA settings
-  page if field use ever asks for them — never in the kid-mode button
-  language.
+The owner's field reality (2026-08-23): the son starts audio on his
+speaker via the box, then GROUPS BY HARDWARE — press-and-hold play on
+other Sonos speakers joins them to the playing group, no app involved.
+He also removes speakers again mid-play, sometimes including the
+ORIGINAL one, so a different speaker than the one that started carries
+the stream. The box must keep up. Hardware-join means topology can
+change quickly and repeatedly: flap resistance is mandatory, and the
+field tests below must be run with the physical buttons.
+
+### Scenario map (settled)
+
+| | What happens | Verdict |
+|---|---|---|
+| (A) rooms ADDED to our session | our speaker stays coordinator; verbs on a coordinator drive the group | WORKS TODAY, nothing to build (code-verified both rounds) |
+| (B) our speaker PULLED into someone else's group | our audio is replaced by theirs; `ours` flips False next poll | KEEP today's behavior: bookmark freezes (ours-gates daemon.py ~1129/~4366), any play-shaped press reclaims OUR speaker only — QA verified this is already the ideal outcome, zero blast radius |
+| (C) our COORDINATOR removed, stream promoted to another speaker | our uid goes standalone STOPPED while the son's audio continues elsewhere | THE FEATURE: migration-follow (design below) |
+
+Rejected with evidence, do not re-litigate:
+- **Broad follow-the-coordinator**: in (B) it turns the kid's four
+  buttons into a house-wide remote for the parent's session, and a
+  coordinator-derived `ours` would open the ONE bookmark-poisoning path
+  today's double gate makes impossible.
+- **Group volume (SetGroupVolume)**: the sonos path deliberately has no
+  volume cap (owner 2026-08-09) — group volume makes a Y-mash a
+  house-wide blast; readback is a membership-weighted average that
+  fights the never-expiring `_sonos_vol_opt` hold; and it silently
+  repurposes the frozen `volume` contract field. Per-room stays,
+  in every grouping state. After migration the knob drives the room
+  actually playing — which is the right room.
+
+### B1 — hygiene (small, low-risk, do first)
+
+1. **Instant grouped-away detection** in `_classify` (sonosd.py, between
+   the `ours` computation and the aux block): a member's TrackURI is
+   `x-rincon:<coordinator-uid>` — set `grouped_away` + `coordinator`
+   from it on the SAME poll (today the aux lags up to ~3 min at cruise,
+   ~12 min stopped). Clear only on a non-empty non-rincon uri (`elif
+   track_uri:` — empty uris must not clear; transitions settle via aux).
+   `startswith("x-rincon:")` is safe against `x-rincon-mp3radio://` and
+   `x-rincon-queue:` (char 8). No wire change — both fields exist.
+2. **Unshadow `renderer_state: "grouped-away"`** in status()
+   (daemon.py ~2533): today `foreign_uri` (always set in (B), it holds
+   the x-rincon string) wins first, so the grouped-away state is
+   UNREACHABLE. Reorder: grouped_away, then taken-over, then
+   lost-session. Existing pins keep passing (their snapshots have
+   grouped_away False).
+3. **Gate the status card's `position` on `ours`** (daemon.py ~2531):
+   while grouped-away the member reports junk RelTime and the card
+   extrapolates it under the kid's book title. Never persisted (the
+   bookmark is ours-gated) — but stop painting it.
+4. **Guard the three unguarded verb posts** on `ours` (raw snap, not
+   _sonos_fresh — a stale ours-False must still suppress):
+   `pause()` (~2061), `unpause()` (~2101), `_sonos_on_term` (~5248).
+   Today they post /pause, /resume, /stop at the member regardless;
+   most firmware refuses (UPnP 701 → 502), but a firmware that
+   forwards them lets a card removal or an install-restart pause/stop
+   the PARENT'S whole group. `_sonos_command`'s playpause needs no
+   change — its ours-check already routes to the reclaim.
+5. **Contract fixture**: additive `STATE_GROUPED` canonical example in
+   tests/sonos_contract.py (ours False, uri/foreign_uri x-rincon,
+   grouped_away True, coordinator set).
+
+### B2 — migration-follow (scenario C, the owner's feature)
+
+**Design: the sidecar detects and HINTS; the daemon owns identity and
+ADOPTS.** The sidecar never changes SESSION.uid itself — the if_uid
+guard (sonosd.py ~571) makes dual-writer identity a 409 machine, which
+is why the hint travels on /state and the daemon acts.
+
+Ground truths the design rests on (verified in code):
+- The three signatures are distinguishable at `_classify`: hijack =
+  non-empty `x-rincon:` TrackURI; natural episode end = STOPPED with
+  TrackURI RETAINED (the `ends_near` queue advance depends on this —
+  do NOT reuse the `lost` flag, it excludes sharelink); migration/lost
+  = STOPPED with EMPTY TrackURI. Migration vs truly-lost is settled
+  only by a live probe of other coordinators.
+- The sharelink `ours` test is prefix-only — safe against our own uid,
+  POISONOUS as a probe criterion (any stranger's Spotify matches).
+  The probe needs exact-track + position continuity for sharelink.
+
+**Sidecar state machine** (new Session fields: `_ours_at`,
+`_last_ours_track`, `_last_ours_rel`, `_migrate_tries`, `_moved`;
+constants `MIGRATE_TRIES = 3`, `MIGRATE_WINDOW_S = 90`):
+1. LIVE: every ours+live classify stamps `_ours_at`, records the
+   sharelink track/rel, re-arms tries, clears `_moved`.
+2. SUSPECT (checked in poll_loop, never the 1.5s live-probe path):
+   raw `transport == STOPPED and not track_uri` and ours seen within
+   MIGRATE_WINDOW_S and tries remain and no pending hint. Hijack can
+   never enter (uri non-empty); episode end can never enter (uri
+   retained).
+3. PROBE, one attempt per tick, `_cadence` returns POLL_S (5s) while
+   tries pend so attempts land at 0/5/10s: call `refresh_topology()`
+   (live, merges the promoted speaker's ip/name into the players cache
+   — never the aux `coordinator`, which ghosts on failed refreshes);
+   for each other-coordinator (cap 6): one GetPositionInfo +
+   GetTransportInfo. Qualify IFF transport live AND — url/nrk:
+   `_norm(candidate uri) == _norm(SESSION.uri)` (hoist the `_norm`
+   closure to module level, refactor-only); sharelink: prefix AND
+   decoded track == `_last_ours_track` AND rel within
+   [-5, +45] of `_last_ours_rel`; `_last_ours_track is None` → never
+   follow.
+4. MOVED: publish `stream_moved: {uid, name, uri}` on every snapshot
+   until cleared (cleared by play(), adopt(), or ours re-arming).
+   Probe-once-per-transition = flap resistance. The `uri` echoed here
+   is SESSION.uri — the snapshot's own uri is EMPTY during STOPPED and
+   would clobber the session on adopt (trap!).
+5. LOST: tries exhausted → exactly today's lost-session; DISARM at
+   600s unchanged (90s window sits far inside).
+
+**Daemon act block** in `_sonos_poller`, right after the /state fetch
+and BEFORE the `not ours -> continue` gate (the migration window IS a
+not-ours window): on `stream_moved` with fresh snapshot
+(`stale_s < 12`) and `renderer.read().uid == snap.uid` (closes the
+re-pick race — a stale hint after the user picked another room is a
+no-op) and hint uid differs: `_renderer.write("sonos", uid, name)`,
+clear `_sonos_vol_opt` (new speaker, new volume world), post `/adopt
+{uid, kind, uri}` (the EXISTING endpoint — mid-session adoption is the
+same operation as the startup reconcile's), wake the poller.
+
+**Continuity (all traced)**: ours flips True against the new uid by
+construction; bookmark freezes during the window (never worse than
+today) and resumes on the first fresh ours snapshot; every verb reads
+renderer.json at call time so if_uid holds after the write; volume
+drives the new room; renderer_name shows the promoted room (name from
+the players cache the probe just refreshed — same source as the
+picker); the same-tile guard no-ops again post-adopt. A second hop
+(promoted speaker removed too) re-fires cleanly: ours re-arms the
+machinery. NO automatic retarget back when the home room rejoins —
+the output follows the stream; the picker is the deliberate way home.
+
+**Wire**: /state gains optional `stream_moved` — additive;
+check_state ignores unknown fields. Add `STATE_MOVED` canonical
+example + sub-shape check. No new endpoints.
+
+**Trap list (full)**: sharelink prefix-follow (1); aux coordinator as
+probe source (2); adopt with the snapshot's empty uri (3); re-pick
+race (4); sidecar-internal retarget = if_uid split-brain (5); `lost`
+flag reuse (6); episode-end/probe race (7); probe lock hold — cap
+candidates, one attempt per tick (8); firmware variance — a removed
+coordinator that RETAINS an x-rincon-queue: uri makes the probe never
+fire, safe false negative but field-verify on THIS household,
+especially for the hardware hold-play leave gesture (9); daemon
+restart mid-window reverts to box, optional follow-up to honor
+stream_moved in reconcile (10); keep the window inside DISARM (11).
+
+**Tests**: tests/sonos_migrate.py (fake-sidecar: hint → renderer.json
++ one /adopt + vol-opt cleared; guards: same-uid hint no-ops, stale/
+mismatched snapshot no-ops, foreign snapshot never follows; post-adopt
+ours → playing + verbs carry new if_uid + bookmark resumes).
+tests/sonos_migrate_probe.py (Session-level: probe fires only on
+STOPPED+empty after ours-live; hijack never probes; 3 tries then lost,
+call count pinned; sharelink exact-track rule; _norm variants;
+probe-once until re-armed; second hop; cadence 5s while pending).
+tests/sonos_contract.py: STATE_MOVED validates, frozen examples
+untouched. New pin from round 1: the grouped-away reclaim (ours False
++ x-rincon foreign → play posts /play at OUR uid, never the
+coordinator; bookmark writes nothing; same-tile falls through).
+
+**Field checklist (with the PHYSICAL buttons, not the app)**:
+1. Start on room A from the box; hold-play on room B → B joins;
+   box verbs drive both (scenario A sanity).
+2. Remove A (app or hardware — test both if the hardware gesture
+   exists on this firmware) → stream continues on B; box card shows
+   B's name and verbs/volume drive B within ~30s (typ. 8-15s).
+   Bookmark advances; survives a power cycle.
+3. Remove B too → lost-session; A-press resumes from the bookmark.
+   Journal shows probe attempts, no match, no follow.
+4. Hijack: pull the box's speaker into another group playing other
+   audio → taken-over card, no retarget in the journal; play-press
+   reclaims the kid's speaker only.
+5. Journal the exact snapshot at the removal instant (trap 9): confirm
+   STOPPED + empty TrackURI on this household's firmware.
+
+**Implementation order**: B1 first (its ours-gates and detection are
+independent and de-risk B2), then B2. Both suites green before field.
+
