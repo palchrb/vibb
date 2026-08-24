@@ -111,6 +111,16 @@ STATE_LOST = dict(STATE_PLAYING, transport="STOPPED", rel_s=0.0,
 STATE_IDLE = {"armed": False, "uid": None, "kind": None,
               "seq": 1, "stale_s": None, "retried_at": None}
 
+# Stage B1 (2026-08-24): our uid pulled into someone else's group as a
+# MEMBER — its AVTransport names the coordinator (x-rincon:<uid>), ours
+# is False, and BOTH aux fields are set on the same poll (instant
+# detection). The daemon shows renderer_state grouped-away (ordered
+# before taken-over, which the x-rincon foreign_uri would otherwise win).
+STATE_GROUPED = dict(STATE_PLAYING, ours=False,
+                     uri="x-rincon:RINCON_PARENT1400",
+                     foreign_uri="x-rincon:RINCON_PARENT1400",
+                     grouped_away=True, coordinator="RINCON_PARENT1400")
+
 # v2 (vibb owns the spotify LOGIC; the speaker holds the queue):
 # track_spotify_uri is the inbound authority (decoded from TrackURI);
 # track_no is 1-based raw Track (cross-check only — 0 for an armed
@@ -143,7 +153,7 @@ def main():
     assert check_state_share(STATE_SHARE) is None
     assert check_state_share(dict(STATE_SHARE, track_no=0))
     for name in ("STATE_PLAYING", "STATE_FOREIGN", "STATE_UNREACHABLE",
-                 "STATE_LOST", "STATE_IDLE"):
+                 "STATE_LOST", "STATE_IDLE", "STATE_GROUPED"):
         err = check_state(globals()[name])
         assert err is None, f"{name}: {err}"
         print(f"{name} validates OK")

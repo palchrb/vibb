@@ -180,6 +180,25 @@ assert [p for p, _ in FAKE["log"] if p == "/play"], \
     "an explicit episode pick must seek, never no-op"
 print("6. fresh / explicit episode -> always respawns OK")
 
+# 7. the grouped-away RECLAIM (stage B pin, QA 2026-08-23): when the
+#    speaker was pulled into someone else's group, ours is False — the
+#    guard must fall through to the FULL transfer at OUR OWN uid, which
+#    detaches the member and resumes the kid's session in the kid's
+#    room only. This is the zero-blast-radius behavior the rejected
+#    "follow the coordinator" sketch would have destroyed; pin it so no
+#    future change can regress it silently.
+steady("PLAYING")
+orch.sonos_snap = dict(orch.sonos_snap, ours=False,
+                       uri="x-rincon:RINCON_PARENT",
+                       foreign_uri="x-rincon:RINCON_PARENT",
+                       grouped_away=True, coordinator="RINCON_PARENT")
+orch.play(TARGET)
+plays = [b for pth, b in FAKE["log"] if pth == "/play"]
+assert plays, "grouped-away + A-press must re-transfer (the reclaim)"
+assert all(b.get("uid") == "RINCON_T" for b in plays), \
+    f"the reclaim goes to OUR speaker, never the coordinator: {plays}"
+print("7. grouped-away A-press reclaims our own speaker OK")
+
 assert SPAWNED == [], "no sonos path may ever spawn a local player"
 
 print("\nSONOS SAME TILE OK — A on the playing tile commands nothing, "

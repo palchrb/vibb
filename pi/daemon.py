@@ -2060,6 +2060,14 @@ class Orchestrator:
         same card unpauses instantly."""
         if self.source == "sonos":
             self._sonos_bookmark_now()
+            # ours-gate (stage B1): while grouped-away/taken-over the
+            # speaker carries SOMEONE ELSE'S stream — a card removal
+            # must not pause the parent's whole group on a firmware
+            # that forwards member verbs. Raw snap, not _sonos_fresh:
+            # a stale ours-False must still suppress; a stale ours-True
+            # degrades to today's refused post.
+            if not (self.sonos_snap or {}).get("ours"):
+                return {"paused": []}
             try:
                 _renderer.post("/pause",
                                {"if_uid": _renderer.read().get("uid")})
@@ -2099,6 +2107,11 @@ class Orchestrator:
         is already playing, this is a no-op.
         """
         if self.source == "sonos":
+            # ours-gate (stage B1), the mirror of pause(): a card
+            # re-insert must not resume the PARENT's paused group. A
+            # no-op is honest here — A on the tile is the reclaim.
+            if not (self.sonos_snap or {}).get("ours"):
+                return {"resumed": []}
             try:
                 _renderer.post("/resume",
                                {"if_uid": _renderer.read().get("uid")})
@@ -2528,12 +2541,22 @@ class Orchestrator:
                 out["playing"] = (snap.get("transport") == "PLAYING"
                                   and bool(snap.get("reachable"))
                                   and bool(snap.get("ours")))
-                out["position"] = self._sonos_position()
+                # position only while the stream is OURS: a grouped-away
+                # member reports the PARENT's RelTime (or x-rincon junk)
+                # and painting it under the kid's book title was pure
+                # nonsense — never persisted (the bookmark is ours-gated)
+                # but wrong on screen every second (QA 2026-08-23)
+                out["position"] = (self._sonos_position()
+                                   if snap.get("ours") else None)
                 out["duration"] = snap.get("dur_s")
-                if not snap.get("ours") and snap.get("foreign_uri"):
-                    out["renderer_state"] = "taken-over"
-                elif snap.get("grouped_away"):
+                # grouped-away FIRST: a member's foreign_uri is always
+                # the x-rincon string, so taken-over shadowed this state
+                # completely — it was unreachable in exactly the scenario
+                # it names (QA 2026-08-23). Order is the fix.
+                if snap.get("grouped_away"):
                     out["renderer_state"] = "grouped-away"
+                elif not snap.get("ours") and snap.get("foreign_uri"):
+                    out["renderer_state"] = "taken-over"
                 elif snap.get("lost_session"):
                     out["renderer_state"] = "lost-session"
             elif self.sonos_snap:
@@ -5250,6 +5273,11 @@ def _sonos_on_term():
             return
         ORCH._sonos_refresh_live()
         ORCH._sonos_bookmark_now()
+        # ours-gate (stage B1): an install-restart while grouped-away
+        # must not STOP the parent's whole group. The bookmark calls
+        # above self-guard; only the transport verb needs the gate.
+        if not (ORCH.sonos_snap or {}).get("ours"):
+            return
         if not load_settings().get("sonos_keep_playing"):
             _renderer.post("/stop",
                            {"if_uid": _renderer.read().get("uid")},

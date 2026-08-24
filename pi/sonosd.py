@@ -655,6 +655,19 @@ class Session:
             if getattr(self, "_ours_logged", None) != track_uri:
                 self._ours_logged = track_uri
                 log(f"not-ours? speaker={track_uri!r} vs set={self.uri!r}")
+        # Instant grouped-away detection (stage B1): a MEMBER follows its
+        # coordinator and its own AVTransport NAMES it — x-rincon:<uid>.
+        # Exact and zero extra SOAP, where the aux fetch below lags by up
+        # to AUX_EVERY polls (minutes at cruise). The prefix cannot match
+        # x-rincon-mp3radio:// or x-rincon-queue: (char 9 is '-'). An
+        # EMPTY uri decides nothing (transitions, just-stopped) — only a
+        # real track uri clears; the aux settles the rest on its cadence.
+        if track_uri.startswith("x-rincon:"):
+            self._aux["grouped_away"] = True
+            self._aux["coordinator"] = track_uri.split(":", 1)[1]
+        elif track_uri:
+            self._aux["grouped_away"] = False
+            self._aux["coordinator"] = None
         # RF audit 2026-08-10 #2: group + volume were HALF the SOAP
         # calls and ~90% of the bytes on every poll — GetZoneGroupState
         # returns the whole household's topology XML, and SoCo's 5s
