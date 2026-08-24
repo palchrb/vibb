@@ -1082,6 +1082,53 @@ class Orchestrator:
         return (snap if snap and (time.monotonic() - self.sonos_snap_at)
                 < self.SONOS_STALE_S else None)
 
+    def _sonos_stream_moved(self, snap):
+        """Act on the sidecar's migration hint: the owner's son removed
+        the room the session started on, Sonos promoted another member,
+        and the sidecar's probe verified OUR stream lives there now
+        (stage B2, owner use case 2026-08-23). The DAEMON owns identity:
+        write renderer.json, then re-attach the sidecar session with the
+        EXISTING /adopt (zero transport commands — the music never
+        stopped). Returns True when it acted (the caller re-ticks).
+
+        Guards, each load-bearing:
+        - renderer must still be sonos AND its uid must equal the
+          SNAPSHOT's session uid: a stale hinted snapshot read after the
+          user re-picked a different room in the picker must be a no-op
+          (the sidecar's /play already cleared the hint and moved on).
+        - snapshot freshness: never act on a ghost.
+        - the hint's uri (SESSION.uri echoed) rides into /adopt — the
+          snapshot's own uri is empty during STOPPED and would kill
+          ours-detection for the rest of the session."""
+        mv = snap.get("stream_moved")
+        if not mv or not mv.get("uid"):
+            return False
+        rd = _renderer.read()
+        if (rd.get("renderer") != "sonos"
+                or rd.get("uid") != snap.get("uid")
+                or mv["uid"] == rd.get("uid")):
+            return False
+        if (snap.get("stale_s") is None
+                or snap["stale_s"] >= 12):
+            return False
+        # adopt FIRST, identity second: a failed adopt then changes
+        # nothing at all, and the hint (still published) retries next
+        # tick. The sub-ms window where the sidecar holds the new uid
+        # while renderer.json still names the old one just 409s a verb
+        # harmlessly — the reverse order would strand a rewritten
+        # renderer.json behind this method's own uid-match guard.
+        try:
+            _renderer.post("/adopt", {"uid": mv["uid"],
+                                      "kind": self.sonos_kind,
+                                      "uri": mv.get("uri")})
+        except _renderer.SidecarDown:
+            return False
+        _renderer.write("sonos", uid=mv["uid"], name=mv.get("name"))
+        self._sonos_vol_opt = None   # new speaker, new volume world
+        log(f"sonos: stream moved to {mv.get('name')} ({mv['uid']}) — "
+            "following")
+        return True
+
     def _sonos_position(self):
         """Last MEASURED position (+ extrapolation while PLAYING). Never
         extrapolates past ~60s of staleness, never invents from STOPPED."""
@@ -4384,6 +4431,13 @@ def _sonos_poller():
                 if (landed or time.monotonic() - optp[1] > SONOS_SEEK_HOLD_S
                         or optp[2] != snap.get("uri")):
                     ORCH.sonos_opt_pos = None
+            # Migration-follow (stage B2): the sidecar found OUR stream
+            # on a promoted coordinator and hinted. MUST run before the
+            # ours-gate below — the migration window IS a not-ours
+            # window. The daemon owns identity: renderer.json + /adopt.
+            if ORCH._sonos_stream_moved(snap):
+                _sonos_wake.set()
+                continue
             stale = snap.get("stale_s")
             fresh = stale is not None and stale < 12
             if not fresh or not snap.get("ours"):

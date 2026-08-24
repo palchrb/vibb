@@ -554,7 +554,19 @@ from "A: play here" to "No speakers answered here" (owner follow-up
 heals itself the moment the box is back on a network where someone
 answers.
 
-## Stage B — reviewed 2026-08-23 (architect + QA, two rounds): READY TO IMPLEMENT
+## Stage B — reviewed 2026-08-23, IMPLEMENTED 2026-08-24
+
+> Both halves built as planned below, suite green (153 files).
+> B1: instant x-rincon detection, grouped-away unshadowed, position
+> ours-gated, the three verb leaks closed (tests/sonos_grouped.py, the
+> reclaim pin in sonos_same_tile #7, STATE_GROUPED). B2: the probe
+> state machine in the sidecar + the daemon act block
+> (ORCH._sonos_stream_moved — adopt FIRST, identity second, so a failed
+> adopt changes nothing and retries free), STATE_MOVED,
+> tests/sonos_migrate_probe.py + sonos_migrate.py. One deviation from
+> the plan: the daemon act lives in a named ORCH method rather than
+> inline in the poller, for testability. AWAITS the field checklist
+> below — run it with the PHYSICAL buttons.
 
 The original sketch ("follow the coordinator for verbs/poll/play, plus
 group volume") was put through an adversarial round and is DEAD in that

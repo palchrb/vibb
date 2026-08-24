@@ -121,6 +121,15 @@ STATE_GROUPED = dict(STATE_PLAYING, ours=False,
                      foreign_uri="x-rincon:RINCON_PARENT1400",
                      grouped_away=True, coordinator="RINCON_PARENT1400")
 
+# Stage B2 (2026-08-24): our coordinator was removed and the stream was
+# promoted to another speaker — our uid reads STOPPED with an EMPTY uri
+# while the probe-verified hint names where the stream lives now. The
+# uri inside the hint is the SESSION's own (what /adopt needs), never
+# the snapshot's empty one. Additive: absent unless a hint is pending.
+STATE_MOVED = dict(STATE_LOST, stream_moved={
+    "uid": "RINCON_KITCHEN1400", "name": "Kjøkken",
+    "uri": "https://podkast.example/ep12.mp3"})
+
 # v2 (vibb owns the spotify LOGIC; the speaker holds the queue):
 # track_spotify_uri is the inbound authority (decoded from TrackURI);
 # track_no is 1-based raw Track (cross-check only — 0 for an armed
@@ -153,7 +162,8 @@ def main():
     assert check_state_share(STATE_SHARE) is None
     assert check_state_share(dict(STATE_SHARE, track_no=0))
     for name in ("STATE_PLAYING", "STATE_FOREIGN", "STATE_UNREACHABLE",
-                 "STATE_LOST", "STATE_IDLE", "STATE_GROUPED"):
+                 "STATE_LOST", "STATE_IDLE", "STATE_GROUPED",
+                 "STATE_MOVED"):
         err = check_state(globals()[name])
         assert err is None, f"{name}: {err}"
         print(f"{name} validates OK")

@@ -78,6 +78,13 @@ AUX_EVERY = 12     # polls between GetVolume/GetZoneGroupState refreshes
 # bedtime story that ended at 21:00 kept the full cadence all night
 # (RF power audit 2026-08-10 #1: ~23k SOAP calls before morning).
 DISARM_AFTER_S = float(os.environ.get("VIBB_SONOS_DISARM", "600"))
+# Migration-follow (stage B2): when OUR coordinator is removed from its
+# group, Sonos promotes another member and hands the stream over — our
+# uid goes standalone STOPPED with an EMPTY TrackURI while the audio
+# continues elsewhere. A short probe window separates that from a truly
+# stopped session; it sits far inside DISARM_AFTER_S by design.
+MIGRATE_TRIES = int(os.environ.get("VIBB_SONOS_MIGRATE_TRIES", "3"))
+MIGRATE_WINDOW_S = float(os.environ.get("VIBB_SONOS_MIGRATE_WINDOW", "90"))
 # NRK Radio's Sonos service id; its service type = sid*256 + 7
 NRK_SID = 277
 NRK_SVCTYPE = NRK_SID * 256 + 7
@@ -283,6 +290,21 @@ MIME = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".m4b": "audio/mp4",
         ".ogg": "audio/ogg", ".opus": "audio/ogg"}
 
 
+def _norm_uri(u):
+    """Speaker-vs-ours uri equality, tolerant of the speaker's
+    re-encoding: percent-escapes, and some firmwares swap the scheme
+    prefix. An exact match called OUR OWN nrk episode foreign, which
+    killed playing/progress for every url-kind card (field 2026-08-09).
+    Module-level (stage B2) because the migration probe needs the same
+    notion of "this is our stream" against OTHER speakers."""
+    u = urllib.parse.unquote(u or "")
+    for p in ("x-rincon-mp3radio://", "aac://", "https://",
+              "http://"):
+        if u.startswith(p):
+            return u[len(p):]
+    return u
+
+
 def _mime_for(uri):
     path = urllib.parse.urlparse(uri).path.lower()
     for ext, mime in MIME.items():
@@ -389,6 +411,12 @@ class Session:
                      "coordinator": None}
         self._aux_n = 0          # <=0 -> refresh aux on the next poll
         self._fast_at = 0.0      # last verb/arm -> fast-cadence window
+        # migration-follow bookkeeping (stage B2)
+        self._ours_at = None       # monotonic of last ours+live classify
+        self._last_ours_track = None  # sharelink: last decoded track uri
+        self._last_ours_rel = None    # sharelink: last rel_s while ours
+        self._migrate_tries = 0    # probe attempts left this transition
+        self._moved = None         # pending {"uid","name","uri"} hint
 
     # -- snapshot plumbing --
 
@@ -397,6 +425,11 @@ class Session:
         snap = {"armed": self.armed, "uid": self.uid, "kind": self.kind,
                 "seq": self._seq, "retried_at": self._retried_at}
         snap.update(fields)
+        if self._moved:
+            # additive hint: the stream moved to another coordinator —
+            # the DAEMON owns identity and acts on it (adopt); published
+            # on every snapshot until cleared so no tick can drop it
+            snap["stream_moved"] = self._moved
         self.snapshot = snap
 
     def state(self):
@@ -417,6 +450,8 @@ class Session:
         uid = body["uid"]
         kind = body.get("kind", "url")
         self.uid, self.kind = uid, kind
+        # a new session voids any pending migration hint/window
+        self._moved, self._migrate_tries, self._ours_at = None, 0, None
         spk = self._spk()
         start = float(body.get("start_s") or 0)
         unhush = self._hush(spk, start)
@@ -562,6 +597,7 @@ class Session:
         self.uri = body.get("uri")
         self.armed = True
         self._frozen, self._last_pos, self._retried_at = 0, None, None
+        self._moved, self._migrate_tries, self._ours_at = None, 0, None
         self._aux_n = 0                    # fresh volume/topology now
         self._fast_at = time.monotonic()
         self._wake.set()
@@ -636,19 +672,8 @@ class Session:
         track_uri = pos.get("TrackURI") or ""
         rel = _hms_to_s(pos.get("RelTime"))
         dur = _hms_to_s(pos.get("TrackDuration"))
-        def _norm(u):
-            # the speaker re-encodes urls (percent-escaping, and some
-            # firmwares swap the scheme prefix) — an exact match called
-            # OUR OWN nrk episode foreign, which killed playing/progress
-            # for every url-kind card (field 2026-08-09)
-            u = urllib.parse.unquote(u or "")
-            for p in ("x-rincon-mp3radio://", "aac://", "https://",
-                      "http://"):
-                if u.startswith(p):
-                    return u[len(p):]
-            return u
         ours = bool(self.uri) and (
-            _norm(track_uri) == _norm(self.uri)
+            _norm_uri(track_uri) == _norm_uri(self.uri)
             or self.kind == "spotify_sharelink" and track_uri.startswith(
                 ("x-sonos-spotify:", "x-sonosprog-spotify:")))
         if not ours and self.uri and track_uri                 and self.kind != "spotify_sharelink":
@@ -738,6 +763,20 @@ class Session:
             if art and art.startswith("/"):
                 art = f"http://{spk.ip_address}:1400{art}"
             fields["track_art"] = art
+        # migration-follow LIVE bookkeeping (stage B2): every ours+live
+        # sighting re-arms the probe machinery and clears a stale hint.
+        # The sharelink track/rel pair is what the probe matches EXACTLY
+        # later — prefix-matching another coordinator would follow any
+        # stranger's Spotify (QA trap #1).
+        if ours and transport in ("PLAYING", "PAUSED_PLAYBACK"):
+            self._ours_at = time.monotonic()
+            self._migrate_tries = MIGRATE_TRIES
+            self._moved = None
+            if self.kind == "spotify_sharelink":
+                self._last_ours_track = (fields.get("track_spotify_uri")
+                                         or self._last_ours_track)
+                if rel is not None:
+                    self._last_ours_rel = rel
         return fields
 
     def poll_loop(self):
@@ -757,6 +796,7 @@ class Session:
                     self._last_ok = time.monotonic()
                     fails = 0
                     self._stall_bookkeeping(fields)
+                    self._maybe_probe_migration(fields)
                     self.publish(**fields)
                 except Exception as e:
                     # speaker unreachable — sidecar-up-speaker-down is its
@@ -796,6 +836,16 @@ class Session:
         if tr == "UNREACHABLE":
             return min(POLL_S * (2 ** min(fails, 6)), 300)
         if tr == "STOPPED":
+            # migration window: attempts should land at ~0/5/10s after
+            # the removal, not on the 60s stopped cadence. Only for the
+            # migration SIGNATURE (empty uri) — an episode-end STOPPED
+            # keeps its cadence.
+            if (not snap.get("uri") and self._moved is None
+                    and self._migrate_tries > 0
+                    and self._ours_at is not None
+                    and time.monotonic() - self._ours_at
+                    <= MIGRATE_WINDOW_S):
+                return POLL_S
             return POLL_STOPPED_S
         # PLAYING: cruise mid-track — fast only near the track end (the
         # ends_near/boundary machinery needs polls inside the last 20s)
@@ -833,6 +883,91 @@ class Session:
                     self._seek_settled(spk, rel)
             except Exception as e:
                 log(f"stall retry failed ({e.__class__.__name__})")
+
+    # -- migration-follow (stage B2) ---------------------------------------
+
+    def _maybe_probe_migration(self, fields):
+        """Called per poll tick, lock held, BEFORE publish. Trigger is
+        the migration signature ONLY: STOPPED with an EMPTY TrackURI.
+        The other two ways a session leaves us cannot enter here —
+        hijack (grouped member) reports a non-empty x-rincon: uri, and
+        a natural episode end reports STOPPED with the track uri
+        RETAINED (the daemon's ends_near advance depends on that; do
+        NOT reuse the `lost` flag, which excludes sharelink). Probe
+        attempts are bounded per transition and re-armed only by an
+        ours+live sighting; a hint, once found, ends the probing
+        (probe-once — flap resistance for a kid mashing hold-play)."""
+        if not (fields["transport"] == "STOPPED" and not fields["uri"]):
+            return
+        if self._moved is not None or self._migrate_tries <= 0:
+            return
+        if self._ours_at is None or \
+                time.monotonic() - self._ours_at > MIGRATE_WINDOW_S:
+            return
+        self._migrate_tries -= 1
+        try:
+            self._probe_migration()
+        except Exception as e:
+            log(f"migration probe failed ({e.__class__.__name__})")
+
+    def _probe_migration(self):
+        """One attempt: is OUR stream now playing on another
+        coordinator? LIVE topology (refresh_topology — which also
+        merges the promoted speaker's ip/name into the players cache,
+        exactly what verb dispatch and the screen name need), then each
+        other-coordinator's OWN transport is probed. NEVER the aux
+        `coordinator` field — it ghosts on failed refreshes (QA trap
+        #2). Match rule: url/nrk by _norm_uri equality (signed/service
+        uris are unique strings — cannot match a foreign stream);
+        sharelink by exact decoded track uri PLUS position continuity,
+        never prefix (trap #1). No match: quiet return — tries run out
+        and the session lands in today's lost-session behavior."""
+        cache = refresh_topology()
+        soco = _soco()
+        cands = [g for g in cache.get("groups") or []
+                 if g.get("coordinator")
+                 and g["coordinator"] != self.uid][:6]
+        for g in cands:
+            uid = g["coordinator"]
+            rec = cache["players"].get(uid)
+            if not rec:
+                continue
+            try:
+                spk = soco.SoCo(rec["ip"])
+                pos = spk.avTransport.GetPositionInfo([("InstanceID", 0)])
+                tr = spk.avTransport.GetTransportInfo([("InstanceID", 0)])
+            except Exception:
+                continue  # a sleepy candidate is not the answer
+            if (tr.get("CurrentTransportState") or "") not in \
+                    ("PLAYING", "PAUSED_PLAYBACK"):
+                continue
+            turi = pos.get("TrackURI") or ""
+            if self.kind == "spotify_sharelink":
+                if self._last_ours_track is None:
+                    return  # nothing exact to match — never follow
+                if not turi.startswith(("x-sonos-spotify:",
+                                        "x-sonosprog-spotify:")):
+                    continue
+                track = urllib.parse.unquote(
+                    turi.split(":", 1)[1].split("?")[0])
+                rel = _hms_to_s(pos.get("RelTime"))
+                base = self._last_ours_rel
+                if (track != self._last_ours_track or rel is None
+                        or base is None
+                        or not (base - 5 <= rel <= base + 45)):
+                    continue
+            else:
+                if _norm_uri(turi) != _norm_uri(self.uri):
+                    continue
+            self._moved = {"uid": uid, "name": rec.get("name"),
+                           # SESSION.uri, NOT the snapshot's — that one
+                           # is EMPTY during STOPPED, and adopt writes
+                           # it into the session (QA trap #3)
+                           "uri": self.uri}
+            self._migrate_tries = 0
+            log(f"stream moved to {rec.get('name')} ({uid}) — hinting "
+                "the daemon")
+            return
 
 
 SESSION = Session()
