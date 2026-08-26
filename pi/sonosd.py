@@ -905,10 +905,20 @@ class Session:
                 time.monotonic() - self._ours_at > MIGRATE_WINDOW_S:
             return
         self._migrate_tries -= 1
+        # Every attempt logs, hit or miss (field 2026-08-26: a silent
+        # no-match was indistinguishable from the code not being
+        # deployed at all — the checklist promised journal lines that
+        # did not exist). Three lines per transition, max.
+        log(f"migration probe {MIGRATE_TRIES - self._migrate_tries}"
+            f"/{MIGRATE_TRIES}: our uid stopped empty — looking for the "
+            "stream on another coordinator")
         try:
             self._probe_migration()
         except Exception as e:
             log(f"migration probe failed ({e.__class__.__name__})")
+        if self._moved is None and self._migrate_tries <= 0:
+            log("migration probe: no coordinator carries our stream — "
+                "settling into lost-session")
 
     def _probe_migration(self):
         """One attempt: is OUR stream now playing on another
