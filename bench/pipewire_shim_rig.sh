@@ -12,6 +12,8 @@
 # soloistd plan's primary audio answer survives contact.
 #
 # Usage:
+#   ./pipewire_shim_rig.sh benchpcm [dev]  # bench only: define the vibb
+#                                     # pcm names (default: "default")
 #   ./pipewire_shim_rig.sh check      # what's installed / what plays
 #   ./pipewire_shim_rig.sh setup      # write the scoped shim config
 #   ./pipewire_shim_rig.sh start      # run the shim (foreground)
@@ -75,6 +77,25 @@ cmd_check() {
     || bad "baseline failed — fix the pcm before testing any shim"
 }
 
+cmd_benchpcm() {
+  # Make the vibb pcm names EXIST on a bench machine so the mechanics
+  # can be tested at all. This is NOT the box's config: vibb_bt here
+  # points at a real local device (so S1/S1b/S2 are honest), while the
+  # box's vibb_bt is plug->bluealsa. S3's exclusivity verdict is only
+  # REAL when the target is an actual bluealsa device — see check.
+  local target="${1:-default}"
+  local f="$HOME/.asoundrc"
+  [ -e "$f" ] && cp "$f" "$f.bak.$(date +%s)" && note "backed up $f"
+  cat > "$f" <<EOF
+# bench-only: vibb pcm names for the shim rig (NOT the box's config)
+pcm.vibb_bt   { type plug  slave.pcm "$target" }
+pcm.vibb_local { type plug  slave.pcm "$target" }
+EOF
+  ok "wrote $f pointing both vibb pcms at '$target'"
+  note "verify:  aplay -L | grep vibb"
+  note "then:    $0 check"
+}
+
 cmd_setup() {
   mkdir -p "$RIG/run"
   # A DELIBERATELY MINIMAL pipewire: no session manager, no monitors,
@@ -109,6 +130,13 @@ context.objects = [
         node.description       = "Vibb shim -> $PCM"
         media.class            = "Audio/Sink"
         api.alsa.path          = "$PCM"
+        # PipeWire wants a card index; for a PLUGIN pcm (plug->bluealsa,
+        # which is exactly what the box uses) it may fail with
+        # "Could not determine card index". VIBB_ALSA_CARD lets the rig
+        # try a hint. If no value makes a plugin pcm work, THAT is the
+        # finding: the shim needs the PulseAudio fallback (plan option
+        # b), whose module-alsa-sink takes arbitrary pcm names.
+        api.alsa.card          = "${VIBB_ALSA_CARD:-0}"
         audio.format           = "S16LE"
         audio.rate             = 48000
         audio.channels         = 2
@@ -191,6 +219,7 @@ cmd_test() {
 cmd_clean() { rm -rf "$RIG"; ok "removed $RIG"; }
 
 case "${1:-check}" in
+  benchpcm) cmd_benchpcm "${2:-default}" ;;
   check) cmd_check ;;
   setup) cmd_setup ;;
   start) cmd_start ;;
