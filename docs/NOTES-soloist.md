@@ -45,6 +45,22 @@ vibb/spotify.py's API client and the sidecar pattern sonosd proves —
 so a future `soloistd` adapter (WS -> the same internal surface) is a
 bounded project, not a rewrite. PipeWire is the real migration cost.
 
+## 2026-09-01 update: the funnel already closed for new accounts
+
+The owner's new-account failure is librespot-org/librespot #1649
+("audio key error 0 1"): login succeeds, Spotify DENIES THE AUDIO KEY
+for accounts created after a ~2024/2025 cutoff (enforced ~Dec 2025).
+DRM-side and account-level — OAuth/device_auth do not help (the
+reporter was already on OAuth), and no librespot-family fix is possible
+without breaking PlayPlay/Widevine (DMCA territory). That thread itself
+converges on Soloist as the sanctioned exit.
+
+So this is no longer a speculative funnel: for NEW accounts it has
+already closed. The box's old account keeps working (pre-cutoff);
+wanting a new account on the box (e.g. the son's own) makes the
+Soloist adapter the only path, at the known costs (PipeWire migration,
+90-day expiry).
+
 ## Decision + the one open question
 
 STAY on the go-librespot fork (works, invested, device_auth covers the
