@@ -202,6 +202,38 @@ spare Pi. Spike script: bench/soloist_spike.py.
 6. Lifecycle: --version format, --pair exit semantics, ws discovery,
    exit-10 via clock jump, session replacement from a second phone.
 
+## SPIKE RUN 1 RESULTS (2026-09-01, bench Pi 5 via loader trick)
+
+The operator skipped the ear/network steps, but the OBJECTIVE numbers
+settled most of the board:
+
+- **Kill 1 core: PASSED.** Skips fire while paused, at 20-40ms each —
+  8 skips in 0.65s total. The walk mechanism is real and fast. Only
+  the audibility of the ~0.4s pre-pause window remains (one listen).
+- **Kill 2: CONFIRMED WINDOWED at exactly 80** (`upcoming: 80` on a
+  100+ playlist). The Web-API-listing-as-required-P2 decision stands.
+- **Kill 4: PASSED objectively.** 10 skips at ~300ms each, zero error
+  frames, playback progressed on the landed item (daemon log). No
+  throttling signature. (The run's STALLED verdict was an unanswered
+  prompt; the mash verdict is events-based now.)
+- **Kill 5: show and artist URIs PLAY** despite the docs' silence —
+  QA's blocker B2 falls for the box's core content. Collection URI
+  still untested.
+- Idle `set_shuffle` ACCEPTED (pre-arm survives); bare play on a
+  playing session is a NOOP (the sonos-hiccup class absent).
+- INVALID from run 1: resume-walk audibility ("y" without listening)
+  and cache_fill ("y" without disconnecting — and soloist ran WITHOUT
+  -C, so there was likely no cache to measure at all). The cache test
+  is now disk-based (bench/soloist_spike.py --cache-dir; requires
+  starting soloist with -C ./cache -z 500) and needs a re-run.
+- Script warts found by the run and fixed: swallowed track_changed
+  events caused 15s audible gaps between tests (not a soloist
+  behavior), and the mash prompt defaulted to STALLED on Enter.
+
+REMAINING before build go/no-go: walk audibility (ears, once),
+disk-based cache fill, collection URI, and the audio-shim question
+(separate rig, needs the scoped-PipeWire config experiment).
+
 ## Cache warming — "silent play-through" (owner idea 2026-09-01, ACCEPTED into P2/P3)
 
 The proactive precache dies with the fork (no download API in Soloist);
