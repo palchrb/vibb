@@ -223,9 +223,14 @@ spare Pi. Spike script: bench/soloist_spike.py.
 The operator skipped the ear/network steps, but the OBJECTIVE numbers
 settled most of the board:
 
-- **Kill 1 core: PASSED.** Skips fire while paused, at 20-40ms each —
-  8 skips in 0.65s total. The walk mechanism is real and fast. Only
-  the audibility of the ~0.4s pre-pause window remains (one listen).
+- **Kill 1: PASSED on a real listen (run 2, 2026-09-01).** Skips fire
+  while paused at 20-60ms each; audible=FALSE when play->pause landed
+  in 60ms. BUT the play->pause gap VARIES run to run (0.06s vs 0.38s),
+  and run 1 at 0.38s WAS faintly audible — so the walk is silent only
+  when the pause wins the race, which is not guaranteed. DESIGN
+  CONSEQUENCE: soloistd keeps the set_volume-0 shroud during the walk
+  as belt-and-braces; do not rely on pause-beats-audio timing. The
+  spine is confirmed viable; the shroud makes it reliable.
 - **Kill 2: CONFIRMED WINDOWED at exactly 80** (`upcoming: 80` on a
   100+ playlist). The Web-API-listing-as-required-P2 decision stands.
 - **Kill 4: PASSED WEAKLY — a single 3s burst only.** 10 skips at
