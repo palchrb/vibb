@@ -230,6 +230,16 @@ settled most of the board:
   events caused 15s audible gaps between tests (not a soloist
   behavior), and the mash prompt defaulted to STALLED on Enter.
 
+- **FIELD FINDING #4: the cache exists BY DEFAULT at
+  `~/.cache/soloist` (XDG cache dir)** — no -C flag needed; the
+  truncated doc line was "default is no LIMIT", not "none". And it
+  held 138MB after a run where nothing played longer than ~60s
+  (~3-4 min of audio ≈ 5-8MB at stream bitrate) — Soloist fetches FAR
+  beyond what is played. Strong whole-file/aggressive-prefetch signal
+  for the warming feature; the disk-based growth test confirms
+  formally. install.sh consequence: cache dir config is optional,
+  size cap (-z) is the knob that matters on the box's SD card.
+
 REMAINING before build go/no-go: walk audibility (ears, once),
 disk-based cache fill, collection URI, and the audio-shim question
 (separate rig, needs the scoped-PipeWire config experiment).
