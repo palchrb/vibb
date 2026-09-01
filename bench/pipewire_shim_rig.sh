@@ -18,6 +18,8 @@
 #   ./pipewire_shim_rig.sh setup      # write the scoped shim config
 #   ./pipewire_shim_rig.sh start      # run the shim (foreground)
 #   ./pipewire_shim_rig.sh test       # the five verdicts
+#   ./pipewire_shim_rig.sh pulse      # plan fallback (b): PulseAudio
+#                                     # module-alsa-sink on the same pcm
 #   ./pipewire_shim_rig.sh clean
 #
 # The five things it must prove (in kill order):
@@ -84,6 +86,14 @@ cmd_benchpcm() {
   # box's vibb_bt is plug->bluealsa. S3's exclusivity verdict is only
   # REAL when the target is an actual bluealsa device — see check.
   local target="${1:-default}"
+  if [ "$target" = "default" ] && command -v pw-cli >/dev/null 2>&1; then
+    bad "'default' on a PipeWire host IS PipeWire's own alsa plugin —"
+    note "plug->default->pipewire is CIRCULAR; the shim would open"
+    note "itself. Pass a REAL hw device instead, e.g.:"
+    note "  aplay -l                 # find the card, e.g. card 0"
+    note "  $0 benchpcm hw:0"
+    return 1
+  fi
   local f="$HOME/.asoundrc"
   [ -e "$f" ] && cp "$f" "$f.bak.$(date +%s)" && note "backed up $f"
   cat > "$f" <<EOF
@@ -136,7 +146,7 @@ context.objects = [
         # try a hint. If no value makes a plugin pcm work, THAT is the
         # finding: the shim needs the PulseAudio fallback (plan option
         # b), whose module-alsa-sink takes arbitrary pcm names.
-        api.alsa.card          = "${VIBB_ALSA_CARD:-0}"
+        api.alsa.card          = ${VIBB_ALSA_CARD:-0}
         audio.format           = "S16LE"
         audio.rate             = 48000
         audio.channels         = 2
@@ -216,10 +226,40 @@ cmd_test() {
                      || say "FAILURES: $fails — see notes above"
 }
 
+cmd_pulse() {
+  # PLAN FALLBACK (b): PulseAudio's module-alsa-sink takes an arbitrary
+  # ALSA device string — including plugin pcms like plug->bluealsa,
+  # which is exactly what PipeWire's card-index lookup chokes on. If
+  # PipeWire cannot do the shim, THIS is the design.
+  say "PulseAudio shim test: module-alsa-sink device=$PCM"
+  command -v pactl >/dev/null 2>&1 || {
+    bad "pactl missing — sudo apt install pulseaudio-utils"; return 1; }
+  local id
+  id=$(pactl load-module module-alsa-sink device="$PCM" \
+         sink_name=vibb_shim sink_properties="device.description=VibbShim" \
+         2>&1) || { bad "load-module failed: $id"; return 1; }
+  ok "loaded module-alsa-sink (id $id) on $PCM"
+  note "playing a tone into the pulse sink..."
+  if paplay --device=vibb_shim /usr/share/sounds/alsa/Front_Center.wav \
+       >/dev/null 2>&1; then
+    ok "audio reached $PCM THROUGH PulseAudio (LISTEN for it)"
+  else
+    bad "paplay failed"
+  fi
+  note "S3 (device release) — waiting 8s then trying another client..."
+  sleep 8
+  timeout 6 speaker-test -D "$PCM" -c2 -t sine -l1 >/dev/null 2>&1 \
+    && ok "another ALSA client opened $PCM (engines can alternate)" \
+    || bad "$PCM still held by pulse — needs suspend-on-idle tuning"
+  note "unload with: pactl unload-module $id"
+  note "and for soloist: PULSE_SINK=vibb_shim ./run-soloist.sh ..."
+}
+
 cmd_clean() { rm -rf "$RIG"; ok "removed $RIG"; }
 
 case "${1:-check}" in
   benchpcm) cmd_benchpcm "${2:-default}" ;;
+  pulse) cmd_pulse ;;
   check) cmd_check ;;
   setup) cmd_setup ;;
   start) cmd_start ;;
