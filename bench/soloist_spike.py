@@ -139,6 +139,11 @@ REPORT = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "tests": {}}
 def record(name, verdict, **detail):
     REPORT["tests"][name] = {"verdict": verdict, **detail}
     print(f"  -> {name}: {verdict}")
+    for k, v in detail.items():
+        vs = json.dumps(v, ensure_ascii=False)
+        if len(vs) > 100:
+            vs = vs[:100] + "…"
+        print(f"       {k}: {vs}")
 
 
 def ask(question):
