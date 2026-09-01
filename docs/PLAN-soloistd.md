@@ -228,10 +228,16 @@ settled most of the board:
   the audibility of the ~0.4s pre-pause window remains (one listen).
 - **Kill 2: CONFIRMED WINDOWED at exactly 80** (`upcoming: 80` on a
   100+ playlist). The Web-API-listing-as-required-P2 decision stands.
-- **Kill 4: PASSED objectively.** 10 skips at ~300ms each, zero error
-  frames, playback progressed on the landed item (daemon log). No
-  throttling signature. (The run's STALLED verdict was an unanswered
-  prompt; the mash verdict is events-based now.)
+- **Kill 4: PASSED WEAKLY — a single 3s burst only.** 10 skips at
+  ~300ms each, zero error frames, playback progressed. Reassuring that
+  basic mashing does not break immediately, BUT this did NOT test the
+  fork's actual failure mode, which was CUMULATIVE (sustained mashing →
+  the 51-track walk that kept the account rate-limited). The mash test
+  is now sustained (10/burst x6 over ~a minute, tracking settle-latency
+  drift) and needs a re-run. Two things remain UNOBSERVABLE in a closed
+  binary regardless: the audio-key economy (the fork's whole
+  optimization) and a delayed account-level cooldown — the honest
+  residual risk of this whole engine for a mashing kid.
 - **Kill 5: show and artist URIs PLAY** despite the docs' silence —
   QA's blocker B2 falls for the box's core content. Collection URI
   still untested.
