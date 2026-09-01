@@ -248,6 +248,21 @@ cmd_pulse() {
   say "PulseAudio shim test: module-alsa-sink device=$PCM"
   command -v pactl >/dev/null 2>&1 || {
     bad "pactl missing — sudo apt install pulseaudio-utils"; return 1; }
+  # THE TRAP: on a PipeWire desktop, pactl talks to pipewire-pulse,
+  # which deliberately does NOT implement module-alsa-sink (PipeWire
+  # owns ALSA itself). Testing the PA shim there measures nothing.
+  local srv
+  srv=$(pactl info 2>/dev/null | grep -i "^Server Name" || true)
+  if printf '%s' "$srv" | grep -qi pipewire; then
+    bad "this is pipewire-pulse, NOT real PulseAudio:"
+    note "  $srv"
+    note "module-alsa-sink is unimplemented there — the verdict would"
+    note "be meaningless. Test the PA shim on a machine with real"
+    note "pulseaudio (a bare Trixie image like the box's, or the box"
+    note "itself), not on a PipeWire desktop."
+    return 1
+  fi
+  note "server: ${srv:-unknown}"
   local id
   id=$(pactl load-module module-alsa-sink device="$PCM" \
          sink_name=vibb_shim sink_properties="device.description=VibbShim" \

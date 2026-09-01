@@ -143,6 +143,24 @@ whoever repeats this: the HDMI/card-busy noise on a desktop Pi is an
 artifact (session PipeWire owns the cards, vc4hdmi is picky) — the
 `null` slave separates that noise from the real finding.
 
+**3c. The Pulse half is UNTESTED and this bench cannot test it.**
+`pactl` on the desktop bench talks to pipewire-pulse, which
+deliberately omits `module-alsa-sink` — so "load-module failed" there
+measures nothing (rig now detects and refuses). Where that leaves the
+audio question, honestly:
+  - PipeWire shim onto a plugin pcm: DEAD (proven).
+  - PulseAudio shim (`module-alsa-sink device=vibb_bt`): the expected
+    answer — PA passes device= to snd_pcm_open with no card lookup —
+    but UNPROVEN. Needs real pulseaudio: a bare Trixie image matching
+    the box, or the box itself at a quiet moment.
+  - Worth noting for the design either way: for the BOX SPEAKER the
+    pcm is `plug -> hw:sndrpihifiberry`, a REAL card — so PipeWire
+    could serve local output directly (api.alsa.path = the hw device)
+    even though it cannot serve vibb_bt. If the Pulse route also
+    fails, the remaining options are asymmetric output (PipeWire for
+    the HAT, something else for BT) or the rejected full-PipeWire
+    platform migration with bluez5. Decide only with evidence.
+
 **3. The audio shim has a rig: bench/pipewire_shim_rig.sh.** Scoped
 PipeWire (own runtime dir, no session manager, no monitors, no bluez5)
 with one static `api.alsa.pcm.sink` on `api.alsa.path = vibb_bt`, and
