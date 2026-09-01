@@ -240,7 +240,8 @@
       "Bash(awk 'NR>=2229 && NR<=2330 && /sonos|playpause|Pause|Play/' pi/daemon.py)",
       "Bash(awk 'NR<=1940 && /    def /' pi/daemon.py)",
       "Bash(ps -p 2742753 -o pid,user,etime,time,args)",
-      "Bash(ls /proc/self/root)"
+      "Bash(ls /proc/self/root)",
+      "Bash(grep -v \"^--$\")"
     ]
   }
 }

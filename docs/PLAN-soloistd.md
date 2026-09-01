@@ -160,6 +160,17 @@ LOST, owner sign-off required at trigger time:
 - The fork's audio-key economy (debounce = 2 key requests per burst),
   proactive /cache/download precache for hotspot trips, /cache/snapshot
   gating, `disable_autoplay` as a hard switch.
+- **Bitrate not settable** (confirmed 2026-09-01 against the snapshot:
+  the full CLI is device-name/api-key/ws/pair/single-track/
+  initial-volume/pipewire-device/data-dir/cache-size/verbose — no
+  quality flag; the options object has shuffle/repeat/speed/modes but
+  no quality; like a real Connect device, quality likely follows the
+  account's app setting — bench item). The fork pins bitrate: 160 as a
+  2.4GHz-radio decision, so losing the knob reads as a regression — but
+  it is SOFTENED by the proven whole-file cache: the 160-pin saved
+  radio DURING playback, whereas Soloist bursts the whole file then
+  plays from disk, so a replay-heavy kid pays a one-time burst per
+  item, not a steady stream, whatever the bitrate.
 
 ## Bench spike protocol (merged, kill-risk order — a scripted day on a spare Pi)
 
