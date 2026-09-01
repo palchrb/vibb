@@ -163,6 +163,18 @@ LOST, owner sign-off required at trigger time:
 
 ## Bench spike protocol (merged, kill-risk order — a scripted day on a spare Pi)
 
+**FIELD FINDING #1 (2026-09-01, before the WS even connected): the
+binary requires glibc >= 2.38.** The owner's Pi 5 on Bookworm (glibc
+2.36) refuses to start it; the announcement blog's Ubuntu 24.04 choice
+was load-bearing, not taste. OS floor: Raspberry Pi OS Trixie
+(glibc 2.41) or Ubuntu 24.04+. THE VIBB BOX ALREADY RUNS TRIXIE — the
+floor is satisfied on the target, and a Trixie bench is MORE
+representative than Bookworm would have been. Had the box been on
+Bookworm this would have been a plan-level blocker; record it as a
+hard deployment constraint alongside the missing armv6 build. Bench
+setup: flash Trixie (desktop, for PipeWire + audible output) on the
+spare Pi. Spike script: bench/soloist_spike.py.
+
 1. The resume walk (kill #1): volume-shroud vs paused-skip variants,
    walk latency at N=5/50/300, event traces, throttling.
 2. `get_queue{limit:0}` truth on 500-track playlist + 200-episode show
