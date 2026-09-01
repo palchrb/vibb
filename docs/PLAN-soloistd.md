@@ -95,6 +95,47 @@ the KILL CRITERIA, in order:
    "track, album, playlist, or episode" — show/artist/collection are
    absent from the contract. Bench: try them anyway.
 
+## IMPLEMENTATION DECISIONS (owner, 2026-09-01, post-spike)
+
+**1. Engine選 is an INSTALL-TIME TOGGLE, not a runtime feature.**
+Owner's call, and it simplifies P1 sharply: `install.sh` asks (or takes
+`VIBB_SPOTIFY_ENGINE=golibrespot|soloist`) and provisions ONE engine —
+units, config, env pair on vibb-daemon.service. No per-entry `engine`
+field, no runtime routing, no two-Connect-devices problem, no
+coexistence bookkeeping in the library schema. Switching engines =
+re-run install.sh with the other value (a documented, deliberate act,
+not a kid-reachable setting). Consequences:
+  - P3 (coexistence UX) is DEFERRED, maybe forever. The per-entry
+    engine field and PWA editor leave the critical path.
+  - The dialect-preserving design is what makes this cheap: the toggle
+    writes VIBB_GO_API + VIBB_GO_UNIT, and every daemon call site is
+    already engine-blind. Rollback = re-run install.sh.
+  - One box, one Spotify account at a time — which matches how the
+    family actually uses it (the son's account OR the parent's).
+  - Reassess only if a real need for both-at-once appears.
+
+**2. Cache renewal across binary swaps is a LONG-RUN OBSERVATION, not
+a test.** It needs a real 90-day build change. bench/
+soloist_cache_canary.py is the ledger: it records the build id + a
+cache census on every run, and the moment the build changes it emits
+SWAP-SURVIVED or SWAP-VOIDED (and says which piece of the updater
+design that settles). Run it from cron on the bench, or fold the same
+bookkeeping into soloistd later. Until it speaks, the plan ASSUMES
+voided and keeps the post-update re-warm in the updater design —
+cheap insurance, dropped the day the canary says SURVIVED.
+
+**3. The audio shim has a rig: bench/pipewire_shim_rig.sh.** Scoped
+PipeWire (own runtime dir, no session manager, no monitors, no bluez5)
+with one static `api.alsa.pcm.sink` on `api.alsa.path = vibb_bt`, and
+`session.suspend-timeout-seconds = 5` as the load-bearing knob for the
+exclusive-bluealsa-device release. Five verdicts: S1 the sink opens the
+pcm, S1b audio reaches the speaker through it, S3 the device is
+RELEASED when idle (the EBUSY trap that would break engine
+alternation), S4 memory against the 430MB budget, S5 output switch by
+rewriting the target pcm. S2 (does Soloist take
+`--pipewire-device vibb-shim`) is the one manual step. THIS RIG IS THE
+LAST GATE before P1.
+
 ## Architecture (settled, all three agents agree)
 
 **Dialect-preserving sidecar.** `pi/soloistd.py` clones the sonosd
@@ -383,11 +424,13 @@ cache before a trip. Design, honest about its one hinge:
 ## Phases (after a surviving spike)
 
 P1 minimal engine (~1.5-2k lines, the sidecar + install section +
-units + env seam): soloist-routed play with exact resume, health,
-pairing, expiry latch, updater. P2 parity (~500-800): optimism, picker
-emulation, prev dance, autoplay suppression, origin marker, output
-choreography. P3 coexistence UX (~300-500): per-entry engine field,
-PWA editor, naming, sharelink fallback routing. Test strategy: a
+units + env seam): soloist play with exact resume (walk + volume
+shroud), health, pairing, expiry latch, updater, and the INSTALL
+TOGGLE (one engine provisioned, env pair written, documented switch).
+P2 parity (~500-800 + the Web API listing component): optimism, picker
+via Web API (REQUIRED — the 80-window cannot page), prev dance,
+autoplay suppression, origin marker, output choreography, cache
+warming. P3 coexistence UX: DEFERRED by decision 1 above. Test strategy: a
 frozen tests/soloist_contract.py (both fakes import it — the two-fakes
 trap), a stdlib fake WS server so CI drives the REAL sidecar, and the
 existing spotify behavioral pins re-run unmodified against it.
