@@ -56,6 +56,17 @@ the KILL CRITERIA, in order:
    autoplay-sourced rows excluded); browse-time enumeration and the
    sonos sharelink pre-map are NOT. KILLED IF: `get_queue{limit:0}` on
    a 500+ item context returns a window rather than the whole thing.
+   OWNER'S READING (2026-09-01): the announcement caps queue metadata
+   at ~80 entries. If confirmed on the bench, the verdicts refine to:
+   song picker/PWA queue CAPPED at ~80 past the playing track (fine
+   for the kid's real content — 5-book series, 25-episode shows; bites
+   on long music playlists), the resume walk UNAFFECTED (sliding
+   window — re-query as you skip), the sonos queue map BROKEN >80
+   without the Web API fallback, cache warming UNAFFECTED. The Web API
+   fallback (credential plumbing exists in the daemon) lists any
+   playlist completely and closes both listing gaps — at its own
+   maintenance cost (Spotify's 180-day re-auth tightening applies
+   there).
    Fallbacks: route enumeration through go-librespot (old account) or
    the Web API plumbing that already exists; otherwise the existing
    `spotify-listing-unavailable` refusal shape.
