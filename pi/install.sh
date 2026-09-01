@@ -138,7 +138,7 @@ fi
 # track a kid replays is downloaded once instead of every time (bandwidth on
 # hotspots; NOT offline playback — the session and audio keys are still live).
 GO_LIBRESPOT_REPO="palchrb/go-librespot"
-GO_LIBRESPOT_VERSION="v0.2.0"  # v0.0.8 Fast skip: debounced next/prev (a
+GO_LIBRESPOT_VERSION="v0.2.2"  # v0.0.8 Fast skip: debounced next/prev (a
 # burst of N presses costs 2 audio-key requests instead of N) + a circuit
 # breaker on throttled keys (aes code 2 -> one retry + stop, never the
 # 51-track walk that kept the account rate-limited); /status gains
@@ -189,7 +189,18 @@ GO_LIBRESPOT_VERSION="v0.2.0"  # v0.0.8 Fast skip: debounced next/prev (a
 # ready/cached etc.), unsupported URIs are rejected early with the
 # user-scoped collection form recognized explicitly, richer track
 # metadata in the CONNECT state (phone display, not our API), and an
-# MP3-decoder build fix.
+# MP3-decoder build fix. v0.2.2: upstream alignment (50 commits),
+# verified non-breaking against every surface vibb touches — all 15
+# config.yml keys intact (schema additions are optional:
+# prefer_firewall_friendly_ports, credentials.device_auth, pipe
+# wait-for-reader), /status field set unchanged, every /player verb +
+# skip_to_uri + /context/tracks + pending_track_uri/pending_track/
+# next_track + the disk cache all present at the tag; the one REMOVED
+# endpoint (/web-api/{path}) has zero callers in vibb. Wins we care
+# about: bounded dealer/AP retry loops + player-close fixes (the
+# zombie-session family), skip_to_uri now finds tracks already in the
+# queue, bounded end-of-track advance, truncated-audio-key and
+# decryption-race fixes.
 GL_VERSION_FILE=/usr/local/bin/.go-librespot.version
 
 if [[ -x /usr/local/bin/go-librespot && $UPDATE -eq 0 \
