@@ -63,10 +63,16 @@ the KILL CRITERIA, in order:
    on long music playlists), the resume walk UNAFFECTED (sliding
    window — re-query as you skip), the sonos queue map BROKEN >80
    without the Web API fallback, cache warming UNAFFECTED. The Web API
-   fallback (credential plumbing exists in the daemon) lists any
-   playlist completely and closes both listing gaps — at its own
-   maintenance cost (Spotify's 180-day re-auth tightening applies
-   there).
+   listing (credential plumbing exists in the daemon) lists any
+   playlist completely and closes both gaps — at its own maintenance
+   cost (Spotify's 180-day re-auth tightening applies there).
+   **PROMOTED FROM FALLBACK TO REQUIRED P2 COMPONENT (owner
+   2026-09-01): "the kids must be able to see the whole playlist when
+   choosing a song." The ~80 window cannot page (anchored at the
+   playing position, not scrollable), so full-picker visibility for
+   soloist-routed entries IS the Web API path: one-time app
+   registration + OAuth, picker/PWA queue served complete from it,
+   and a PWA re-connect nag every ~180 days as the running cost.**
    Fallbacks: route enumeration through go-librespot (old account) or
    the Web API plumbing that already exists; otherwise the existing
    `spotify-listing-unavailable` refusal shape.
