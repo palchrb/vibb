@@ -124,6 +124,25 @@ bookkeeping into soloistd later. Until it speaks, the plan ASSUMES
 voided and keeps the post-update re-warm in the updater design —
 cheap insurance, dropped the day the canary says SURVIVED.
 
+**3b. SHIM FINDING (bench, 2026-09-01): PipeWire CANNOT be the shim —
+the design flips to PulseAudio.** PipeWire's `api.alsa.pcm.sink`
+resolves a CARD INDEX (`spa_alsa_init`: "Could not determine card
+index"), and a PLUGIN pcm has none. The box's `vibb_bt` is exactly
+that: `plug -> bluealsa`. Proven hardware-independently by pointing the
+bench pcm at `null` (no HDMI, no busy card, no device at all) — same
+refusal, with `api.alsa.card` set. So the plan's PRIMARY audio answer
+is dead and FALLBACK (b) becomes primary: PulseAudio
+`module-alsa-sink device=vibb_bt`, which passes the string straight to
+snd_pcm_open and never asks for a card. Soloist supports it explicitly
+("If PipeWire cannot initialize, Soloist falls back to PulseAudio").
+Consequences for the plan: swap the shim implementation (config, unit,
+and the soloistd knob becomes PULSE_SINK, not --pipewire-device);
+bluealsa still keeps the BT path; the S3 device-release question is
+UNCHANGED and still needs a real bluealsa target. Bench note for
+whoever repeats this: the HDMI/card-busy noise on a desktop Pi is an
+artifact (session PipeWire owns the cards, vc4hdmi is picky) — the
+`null` slave separates that noise from the real finding.
+
 **3. The audio shim has a rig: bench/pipewire_shim_rig.sh.** Scoped
 PipeWire (own runtime dir, no session manager, no monitors, no bluez5)
 with one static `api.alsa.pcm.sink` on `api.alsa.path = vibb_bt`, and
