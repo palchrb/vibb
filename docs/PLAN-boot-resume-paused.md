@@ -750,3 +750,237 @@ coordinator; bookmark writes nothing; same-tile falls through).
 **Implementation order**: B1 first (its ours-gates and detection are
 independent and de-risk B2), then B2. Both suites green before field.
 
+
+---
+
+# PART 5: seek — uniform tap, intent-based hold acceleration, bounded verb rate
+
+Owner design (2026-09-01, refined together): a TAP is 15s, always, on
+every content type — one rule for muscle memory. HOLDING the button is
+the declaration of intent to travel: acceleration keys off TIME SINCE
+THE HOLD STARTED, never off press count, so rapid taps can no longer
+climb the ladder by accident (the surprise-jump the son demonstrated on
+short songs). Plus a ~700ms coalescing throttle so a hold cannot storm
+the speaker or the upstream sources.
+
+## Current state (all verified in code)
+
+- UI: `SEEK_STEPS = (30, 60, 120, 300)` advanced PER PRESS
+  (ui.py:587, 2143-2159); holding B/Y repeats every `CARD_REPEAT_S =
+  0.35` from the main loop (ui.py:588, 2133, the `_card_repeat` pin) —
+  so a hold reaches 120s steps within ~1.4s regardless of duration.
+  Reversal resets the ladder ("I overshot"). The bar is optimistic and
+  compounds from `_pos_expect` (absolute targets by design — N relative
+  jumps against a stale poll would collapse into one). Live streams
+  (dur None) refuse before any post.
+- Daemon `/seek` (1940-2039): absolute contract, `SEEK_TAIL_S = 5`
+  end-clamp on every branch. Routing: sonos FIRST and never falling
+  through (coalesced `_sonos_seek_worker`, latest-target-wins;
+  `sonos_opt_pos` display hold 12s; `bm_hold` cleared; `_seek_at`
+  stamp) → mpv (IPC absolute, `touch_user_skip` before the command —
+  the EOF/watchdog rollback guard) → spotify (`go /player/seek`, ms).
+- Sidecar seek: ONE SOAP (`avTransport.Seek`, sonosd.py:623) + a poll
+  wake. Cheap; the field storm's expensive verbs were the STEPS.
+- Field reading 2026-09-01: a held seek = 0.35s-cadence targets; the
+  consumer runs at roughly press rate so nearly every target became a
+  SOAP round (21 in 17s) and contributed to the sidecar backlog.
+
+## Changes
+
+### 1. ui.py — time-based ladder (replaces the per-press ladder)
+
+Constants (all field-tunable, replacing SEEK_STEPS):
+```
+SEEK_TAP_S = 15          # a tap, every tap, everywhere
+SEEK_HOLD_LADDER = (     # (held longer than, step becomes)
+    (1.5, 45), (3.5, 120), (6.0, 300))
+```
+Mechanics in `_seek_press`:
+- A FRESH physical press (the event site, ui.py:2108→2133, which is
+  also what creates the `_card_repeat` pin) stamps
+  `self._seek_hold_t0 = now` and uses SEEK_TAP_S. Repeats (fired by
+  the main-loop pin, the `_card_step` at the repeat site) pick the
+  step from `now - _seek_hold_t0` via the ladder. The two call sites
+  pass a `held` flag — the state machine (`seek_step_i`) dies.
+- Rapid taps: each is a fresh press → 15s each, always. Predictable.
+- Reversal: direction change resets `_seek_hold_t0` AND direction —
+  today's "I overshot" rule, kept verbatim.
+- DURATION CLAMP: `step = min(step, max(SEEK_TAP_S, dur / 4))` — on a
+  3-minute song the hold tops out around 45s instead of teleporting;
+  on an audiobook the clamp is inert. This is what makes "one rule
+  everywhere" hold at the edges.
+- `seek_shown` keeps displaying ±step (the visible acceleration).
+
+### 2. ui.py — post throttle at the source (protects EVERY upstream)
+
+While a hold is active, POST `/seek` at most every
+`SEEK_POST_MIN_S = 0.7` with the LATEST compounded target; a single
+tap posts immediately (today's behavior). The FINAL target must always
+land: the throttle keeps a dirty-target flag and the main loop (which
+already drives `_card_repeat`) flushes it when the hold ends or the
+window passes. The bar stays instant — only the network posts are
+spaced.
+
+Why UI-side and not only the sonos worker: the storm's source is the
+0.35s repeat, and the repeat feeds THREE upstreams — the sonos sidecar
+(SOAP + poll wakes), go-librespot (`/player/seek` per press straight
+into the spotify session), and mpv (cheap, but why hammer it). One
+seam at the producer bounds them all; mpv/spotify audio still lands
+within ~0.7s so scrubbing stays audible ("hear where you are",
+owner's own requirement).
+
+### 3. daemon — `_sonos_seek_worker` spacing (defense in depth)
+
+After each posted seek, the worker waits `SONOS_SEEK_SPACING_S = 0.7`
+before pulling the next want. Latest-wins already guarantees the final
+target lands. This bounds NON-box clients too (PWA, future API users)
+and costs nothing when the UI throttle already spaced the posts.
+
+## Holistic notes (upstream × downstream)
+
+- **mpv content** (podcasts/storytel, local or range-requests): seeks
+  are IPC-cheap; the EOF guard (`touch_user_skip`) is untouched; the
+  throttle just reduces redundant IPC.
+- **Spotify local**: every press currently becomes a
+  `go /player/seek` — the throttle cuts that to ≤1.4/s, less churn
+  against the fork and Spotify upstream. `go_status`'s 1s cache is
+  irrelevant here (absolute targets never read it mid-hold).
+- **Sonos**: fewer SOAP rounds AND fewer poll wakes (each seek verb
+  sets `_wake`); the "speaker restarted the track and nothing asked"
+  settle machinery gets fewer chances to false-trigger. The
+  `sonos_opt_pos` 12s display hold dwarfs the ≤0.7s added landing
+  latency.
+- **Bookmarks**: `_bm_wake` fires per POSTED seek — fewer wakes, same
+  correctness (the bookmarker reads positions, not intents).
+- **PWA / delta seeks**: server-side, unthrottled by change #2, bounded
+  by change #3 on sonos; unchanged otherwise.
+- **Live streams**: dur None refuses in `_seek_press` before any
+  throttle state exists — unchanged.
+
+## Tests
+
+- ui: tap always 15 (including five rapid taps — the old ladder would
+  have reached 300); hold escalation crosses 45/120/300 at the ladder
+  times (frozen monotonic, the ui_marquee_anchor pattern); reversal
+  resets; duration clamp (180s track → hold tops at 45); the throttle
+  never loses the final target (hold ends between posts → flush);
+  a single tap posts immediately.
+- daemon: worker spacing ≥0.7s between posts under a mash, final
+  target lands (extend seek_routes.py).
+- Check/update: tests/ui_card_cycle.py (references the seek card
+  internals), tests/seek_routes.py (absolute contract — unchanged by
+  design).
+
+## Verify in field
+
+Short song: tap ×3 → exactly 45s traveled, audibly. Hold 2s → step
+grows to 45 and stops there (clamp). Audiobook: hold ~8s → ±300 shown,
+~10s of hold ≈ 30 min traveled, music audible and jumping ~1/s the
+whole way. Sonos: journal shows ≤2 "seek -> sonos" lines per second
+during any hold. The kid's verdict on 15s/thresholds decides the
+constant tuning.
+
+## Review round 2026-09-01 (architect + QA) — corrections, BINDING
+
+The draft above stands EXCEPT where this section overrides it.
+
+### Design change: single-flight seek poster in the UI (subsumes the throttle)
+
+QA's strongest find: with spaced posts and per-repeat compounding, the
+daemon's echoed clamp ADOPTS BACKWARD into `_pos_expect` between
+repeats (ui.py:2186-2192) — the bar rewinds mid-hold, travel goes
+erratic; and on spotify a SLOW older post can land at go-librespot
+AFTER the final one (the /seek route runs per-request threads,
+go_status "can take seconds") — "the final target always lands" was
+unsound. One mechanism fixes ordering, rewind and the flush at once:
+the UI gets its own coalescing SINGLE-FLIGHT poster — the exact
+pattern `_sonos_seek_worker` already proves — one background thread,
+dirty-latest-target, posts when (previous response arrived) AND
+(≥ SEEK_POST_MIN_S since last post). Never two in flight, so ordering
+holds on every path; the response may adopt the clamp ONLY when no
+newer target is dirty; a refusal clears the dirty flag (no doomed
+re-post after "Can't seek here", whose 1.4s card-kill runs in the same
+main loop — ui.py:3993-4003).
+
+### Corrections to the ladder
+
+- The plan's travel math was ~2.5x off (targets compound per 0.35s
+  REPEAT; only posts are spaced): the drafted ladder gives ~70 min per
+  10s hold. Retuned thresholds: `((1.5, 45), (4.0, 120), (8.0, 300))`
+  — ≈15/45/120/300 travel rates of ~43/129/343/857 s-content per held
+  second; ~10s hold ≈ 45-55 min on a book. Release-reaction ±0.3s at
+  the 300-rung means ±4 min landing slop — acceptable for
+  chapter-scale travel, field-tunable constants either way.
+- The step clamp `dur/4` did NOT stop a short-song teleport (a 180s
+  song was crossed in ~1.5s at the 45-rung). The clamp is now
+  `step = min(ladder, max(SEEK_TAP_S, dur / 12))` — a step never
+  exceeds ~8% of the track: a 3-min song stays at 15s steps for its
+  whole life (43 s/s — the full song in ~4s of hold, controllable), a
+  10-min podcast tops at ~50s, books are unaffected.
+- `_seek_hold_t0` stamps at the FRESH-PRESS sites — which are three,
+  not one (taps ui.py:2036/2059, the hold entry `_card_hold`
+  ui.py:2132-2133); the repeat firer is the main loop at ui.py:3990
+  and is the ONLY caller passing `held=True` through
+  `_card_step(sign, held)` → `_seek_press(dirn, held)`. Do NOT read
+  `self._card_repeat` state instead: the pin-clear runs before event
+  dispatch in the same loop iteration, so a quick release-retap would
+  classify a fresh tap as held — the surprise-jump bug class this part
+  exists to kill. Volume/shuffle ignore the flag.
+- `seek_step_i` dies at ui.py:1402/1478/2102/2153-2159; the resets at
+  1478 (TRACK CHANGE — real mid-hold on sonos: the tail plays out and
+  auto-advances under a held button) and 2102 (fresh card visit)
+  migrate to resetting `_seek_hold_t0` + `seek_dir`. The 1483 trap
+  generalizes: the landed/expired branch (1479-1487) runs between
+  repeats and must never touch `_seek_hold_t0`.
+
+### Corrections to the daemon half
+
+- The 0.7s spacing in `_sonos_seek_worker` goes AFTER the post/wakes,
+  OUTSIDE `_sonos_step_lock` (daemon.py:2043) — that mutex is shared
+  with the step enqueue and step worker; sleeping under it would block
+  next/prev and every /seek handler. `SONOS_SEEK_SPACING_S`
+  env-tunable like SONOS_SEEK_HOLD_S.
+- Mirror `SEEK_TAIL_S = 5` into the UI's own clamp (ui.py:2168 clamps
+  to dur, daemon to dur-5 — the asymmetry oscillates under adoption).
+
+### Honest cost model (QA corrections, tuning must not lean on the old claims)
+
+A posted sonos seek is ~3 rounds, not 1: the Seek SOAP + the woken
+poll pair, all under SESSION.lock, and each verb re-arms VERB_FAST_S
+fast polling; each posted seek's `_bm_wake` triggers a go_status HTTP
+round in the bookmark loop; on spotify every `go()` invalidates the
+1s status cache. The throttle bounds all of it (~4 rounds/s during a
+hold); just don't quote "one SOAP, cheap".
+
+### Known limitations, documented not fixed here
+
+- Seek on a STOPPED sonos session (e.g. right after boot-lands-paused)
+  is a silent no-op: the speaker 701s, the async worker ignores it,
+  the bar travels on the 12s opt hold then snaps back. Pre-existing;
+  a future fix could surface the worker's 502 as seek_refused.
+- No path resumes on seek (all three seek in place) — paused scrubbing
+  is silent everywhere; the "hear where you are" property assumes
+  PLAYING.
+- The `delta` seek contract has zero callers today (PWA/mpris don't
+  seek); kept for the API surface.
+- A backward scrub crossing the sonos bookmark throttle window can
+  briefly persist a near-top position (the `_seek_at` grace disables
+  the restart-floor guard); self-heals on the next poll.
+
+### Tests (amended)
+
+- THE rig (QA's pick, catches the whole adoption seam): fake daemon
+  that DELAYS /seek responses past the next repeat; assert
+  `_pos_expect` never moves backward and the final posted target
+  equals the final compounded target.
+- tests/ui_card_cycle.py concrete breaks: line 227 expected seeks
+  become [615, 630, 645]; 231 reversal 780→630; 232 `seek_step_i`
+  AttributeError; 241-256 (9b) rewritten as a HELD-repeat ladder test
+  under the existing frozen-monotonic harness (lines 190-214); 9c/9d
+  survive.
+- New: five rapid taps = 5×15s (the old ladder would hit 300); hold
+  crossing 1.75s/4.2s grid boundaries (thresholds land on the 0.35s
+  repeat grid — effective 1.75/4.2/8.05); dur/12 clamp on 180s;
+  single-flight (no second post while one is in flight); refusal
+  clears dirty; X-mid-hold (card switch under a held button) still
+  flushes the final target via the deadline, not the pin-clear.
