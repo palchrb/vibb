@@ -51,6 +51,23 @@ cmd_check() {
     note "(plug->hw:sndrpihifiberry). For a bench without the HAT,"
     note "point vibb_local at plug->default to exercise the mechanics."
   fi
+  say "is $PCM a REAL device or the null placeholder? (false-pass trap)"
+  # install.sh ships vibb_bt as plug->null until play.sh replaces it
+  # with a real bluealsa device on first BT connect. A null slave
+  # accepts every open, never blocks, and always "plays" — so S3 (the
+  # exclusive-device release, the whole point) would PASS falsely.
+  if grep -A3 "pcm\.$PCM" /etc/asound.conf 2>/dev/null | grep -q '"null"'; then
+    bad "$PCM is the PLACEHOLDER (slave.pcm null)"
+    note "S1b and S3 will pass MEANINGLESSLY against a null sink."
+    note "Fix: pair+connect a BT speaker so play.sh writes the real"
+    note "bluealsa pcm, or point $PCM at a real hw device by hand."
+  elif grep -A5 "pcm\.$PCM" /etc/asound.conf 2>/dev/null | grep -qi "bluealsa"; then
+    ok "$PCM is a real bluealsa device — S3 will test the real thing"
+  else
+    note "$PCM is neither null nor bluealsa; S3 tests THAT device's"
+    note "open semantics, which may differ from bluealsa's exclusivity."
+  fi
+
   say "does the pcm play RIGHT NOW (baseline, no pipewire)?"
   note "running: speaker-test -D $PCM -c2 -t sine -l1"
   timeout 6 speaker-test -D "$PCM" -c2 -t sine -l1 >/dev/null 2>&1 \
