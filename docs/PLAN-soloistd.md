@@ -284,12 +284,22 @@ audio-shim question (separate rig, the scoped-PipeWire experiment).
 
 Undocumented, and it compounds with the never-run offline test. Two
 unknowns, two experiments:
-- **Offline playability:** does cached content play with NO network, or
-  are live DRM keys required per playback regardless (the librespot
-  world's limit)? Test now: daemon up, pull the Pi's network, try to
-  play a track cached in run 1 (e.g. DAISIES). Plays = cache + offline
-  keys; fails = the cache is a BANDWIDTH SHIELD ONLY (still exactly the
-  fork's behavior and still worth it for hotspot trips).
+- **Offline playability — SCOPE, so "offline" is not misread:** the
+  question is A, NOT B.
+  A = "play an ALREADY-CACHED track with the network briefly down" —
+    the file is on disk (proven), but does Soloist need a LIVE session
+    to fetch the audio key per playback (the librespot-world limit)?
+  B = "complete offline for days (airplane/cabin, no packets at all)"
+    — NEVER on the table for ANY Spotify engine; the fork's own config
+    says session+keys are live requirements. The box's real offline
+    floor is the mpv side (Storytel downloads, podcast cache), full
+    stop. soloistd does not change that and never promised to.
+  Test A now: daemon up, pull the Pi's network, play a run-1-cached
+  track (e.g. DAISIES). Plays = cache holds keys, real value even when
+  the hotspot is off. Fails = the cache is a BANDWIDTH SHIELD ONLY
+  (spares metered data WHILE there is net — still worth the warming,
+  just not an offline mode). Either outcome only moves how hard we
+  sell warming; neither is a blocker.
 - **Cross-build survival:** the content-addressed filenames
   (cache/73/730d...file, SHA-style) SUGGEST keying by Spotify file-id,
   not client version — which would survive. BUT the 90-day fuse IS key
