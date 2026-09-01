@@ -261,23 +261,51 @@ def t2_queue_truth(ws, uri, label, expect_hint):
 
 # --- kill criterion 4: the mash ---------------------------------------------
 
-def t4_mash(ws):
-    print("\n== KILL 4: mash — 10 skip_next in ~3s, watch for throttling")
-    errors, t0 = [], time.monotonic()
-    for _ in range(10):
-        ws.send_json({"type": "command", "command": "skip_next"})
-        time.sleep(0.3)
-    events = ws.drain(20.0)
-    for e in events:
-        if e.get("type") == "error":
-            errors.append(e)
+def t4_mash(ws, playlist, rounds=6):
+    """SUSTAINED mash (QA spec: ~10 skips/burst, repeated for ~a
+    minute) — a single 3s burst never reaches the account-level
+    throttle the fork's circuit breaker was built for; the kid's real
+    failure mode was CUMULATIVE. We measure the OBSERVABLE: error
+    frames, whether skips keep landing, and how skip LATENCY drifts
+    across rounds (a rising trend is the visible face of throttling).
+    What we CANNOT see in a closed binary: the audio-key economy
+    itself (how many key requests each skip costs) and any account
+    cooldown that lands minutes later — both noted as unpatchable
+    unknowns, not passes."""
+    print("\n== KILL 4: SUSTAINED mash — 10 skips/burst x %d, ~1 min"
+          % rounds)
+    cmd(ws, "play", uri=playlist, wait_event="track_changed", wait_s=15)
+    errors, per_round, t0 = [], [], time.monotonic()
+    for r in range(rounds):
+        rt = time.monotonic()
+        for _ in range(10):
+            ws.send_json({"type": "command", "command": "skip_next"})
+            time.sleep(0.3)
+        ev = ws.drain(6.0)
+        errs = [e for e in ev if e.get("type") == "error"]
+        errors += errs
+        _st, uri = current_item(ws)
+        per_round.append({"round": r + 1,
+                          "settle_s": round(time.monotonic() - rt - 3, 2),
+                          "errors": len(errs),
+                          "landed": uri is not None})
+        print(f"       round {r+1}: settle "
+              f"{per_round[-1]['settle_s']}s, errors {len(errs)}, "
+              f"landed {per_round[-1]['landed']}")
     _st, uri = current_item(ws)
-    ok = uri is not None and not errors
-    record("mash", "PASS" if ok else
-           ("ERRORS" if errors else "STALLED"),
-           duration_s=round(time.monotonic() - t0, 1),
-           error_frames=errors[:5], event_count=len(events),
-           landed_uri=uri)
+    settles = [p["settle_s"] for p in per_round]
+    drift = settles[-1] - settles[0]
+    stalled = any(not p["landed"] for p in per_round)
+    verdict = ("ERRORS" if errors else "STALLED" if stalled or uri is None
+               else "SLOWS" if drift > 3 else "PASS")
+    record("mash_sustained", verdict,
+           rounds=per_round, total_s=round(time.monotonic() - t0, 1),
+           settle_drift_s=round(drift, 2), error_frames=errors[:5],
+           landed_uri=uri,
+           unobservable="audio-key economy + delayed account cooldown "
+                        "are invisible in a closed binary")
+    print("  NOTE: watch the account for the next few MINUTES — a "
+          "throttle/cooldown can land late and is not visible here.")
     cmd(ws, "pause")
 
 
@@ -429,7 +457,7 @@ def main():
     t2_queue_truth(ws, args.big_playlist, "big_playlist", 100)
     if args.show:
         t2_queue_truth(ws, args.show, "show", 50)
-    t4_mash(ws)
+    t4_mash(ws, args.big_playlist)
     t5_uris(ws, {"show": args.show, "artist": args.artist,
                  "collection": args.collection})
     t6_cache_fill_disk(ws, args.show, args.cache_dir)
