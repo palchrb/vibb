@@ -157,10 +157,42 @@ LOST, owner sign-off required at trigger time:
 4. Mash (kill #4): 10 presses/3s for a minute; throttle signature and
    recovery.
 5. URI acceptance (kill #5): show/artist/collection despite the docs;
+   ALSO: cache-fill semantics — play 3s of a track, disconnect network,
+   replay it: served whole from cache or partial? (Decides the cache-
+   warming feature's cost class, see the warming section.)
    bare play on an already-playing session (the Sonos-hiccup class);
    idle set_shuffle persistence; context-end default behavior.
 6. Lifecycle: --version format, --pair exit semantics, ws discovery,
    exit-10 via clock jump, session replacement from a second phone.
+
+## Cache warming — "silent play-through" (owner idea 2026-09-01, ACCEPTED into P2/P3)
+
+The proactive precache dies with the fork (no download API in Soloist);
+the owner's counter: script a SILENT PLAY-THROUGH to warm the organic
+cache before a trip. Design, honest about its one hinge:
+
+- **THE HINGE (bench spike item, added to the protocol):** does
+  Soloist's cache store WHOLE tracks on play (or on seek-touch), or
+  only the chunks actually played? Whole-file ⇒ warming is ~2s + a few
+  seek-hops per track — a playlist warms in minutes. Chunk-based ⇒ a
+  sparse cache is worthless and warming means REAL-TIME play-through —
+  nights, not minutes, still viable for a kid's stable rotation
+  (warm once, then only new content) but a different cost class.
+- Silence done properly: during warming, soloistd retargets the
+  PipeWire shim to a NULL SINK — no audio path to speaker/BT at all;
+  volume-0 only as belt-and-braces (it is Connect-visible).
+- The list already exists: the library's per-entry `cache: N` field is
+  the same contract today's sweep uses; warming is a new branch in the
+  cache sweeper for soloist-routed entries.
+- Gating inherited from the sweep/backup culture: charger + idle +
+  REAL home wifi only (never the hotspot — warming over the metered
+  link pays the bill the cache exists to avoid); any button press
+  aborts instantly (warming is always the side that can wait); a
+  warming-marker so idle.py does not read it as kid-activity and hold
+  the box awake — the warming window carries its own time budget.
+- Play-history pollution: accepted — it is the kid's own content on
+  the kid's own account; the oddity is 03:00 timestamps. No private-
+  session command exists in the API.
 
 ## Phases (after a surviving spike)
 
