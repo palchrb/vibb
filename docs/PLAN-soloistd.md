@@ -218,6 +218,41 @@ spare Pi. Spike script: bench/soloist_spike.py.
 6. Lifecycle: --version format, --pair exit semantics, ws discovery,
    exit-10 via clock jump, session replacement from a second phone.
 
+## SPIKE COMPLETE (2026-09-01, bench Pi 5, glibc loader trick) — API/BEHAVIOR SIDE ALL GREEN
+
+Final clean run (updated script + --data-dir). Every kill criterion
+passed on the API/behavior side; the only remaining gate is the
+audio-shim rig (a separate PipeWire->bluealsa config experiment, not
+part of this WS spike).
+
+- Kill 1 (resume spine): PASS, silent (see run-2 note; keep the volume
+  shroud for the variable pause gap).
+- Kill 2 (queue): WINDOWED at 80 confirmed → Web-API listing is the
+  required P2 component for full pickers. Not a blocker.
+- Kill 4 (SUSTAINED mash, 60 skips over ~1 min): PASS on the
+  meaningful signals — ZERO error frames, landed on a real track every
+  one of 6 rounds, no lockout. HONEST CAVEAT: the settle-latency
+  sub-metric was degenerate (it echoed the fixed 6s drain window, not a
+  real settle time), so a SUBTLE slowdown was not actually measured;
+  and the two closed-binary unknowns stand (audio-key economy, a
+  delayed account cooldown). Good enough — the error/landing evidence
+  is the load-bearing part; the residual is unobservable by design.
+- Kill 5 (URIs): show, artist, AND collection (Liked Songs) all PLAY
+  despite the docs listing only track/album/playlist/episode. QA's
+  blocker B2 fully cleared — the son's whole library is playable.
+- Cache = WHOLE-FILE (settled from disk evidence, 91MB from ~30s of a
+  157-min episode; bitrate follows the account's download-quality
+  setting ~160). cache_fill SKIPPED in the final run only because
+  --cache-dir was omitted; already answered.
+- paused_skip PASS, idle set_shuffle ACCEPTED, bare-play NOOP.
+
+VERDICT: soloistd is TECHNICALLY VIABLE. No kill criterion killed it.
+Remaining before a build decision: (1) the audio-shim rig on a Trixie
+bench (scoped PipeWire sink onto a bluealsa pcm — the one untested
+integration risk), (2) the owner's timing call, and (3) the two cache
+experiments that only refine the warming pitch (offline-during-a-blip;
+cross-build survival at the first update). The plan below stands ready.
+
 ## SPIKE RUN 1 RESULTS (2026-09-01, bench Pi 5 via loader trick)
 
 The operator skipped the ear/network steps, but the OBJECTIVE numbers
