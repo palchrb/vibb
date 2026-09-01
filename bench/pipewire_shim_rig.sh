@@ -74,9 +74,23 @@ cmd_check() {
 
   say "does the pcm play RIGHT NOW (baseline, no pipewire)?"
   note "running: speaker-test -D $PCM -c2 -t sine -l1"
-  timeout 6 speaker-test -D "$PCM" -c2 -t sine -l1 >/dev/null 2>&1 \
-    && ok "baseline audio through $PCM works" \
-    || bad "baseline failed — fix the pcm before testing any shim"
+  local err
+  if err=$(timeout 6 speaker-test -D "$PCM" -c2 -t sine -l1 2>&1); then
+    ok "baseline audio through $PCM works"
+  else
+    bad "baseline failed — the ACTUAL error:"
+    printf '%s\n' "$err" | tail -4 | sed 's/^/         /'
+    if printf '%s' "$err" | grep -qi busy; then
+      note "=> the device is HELD by another client. On a desktop Pi"
+      note "   that is the session PipeWire. Free it with:"
+      note "     systemctl --user stop wireplumber pipewire-pulse pipewire"
+      note "     systemctl --user stop pipewire.socket pipewire-pulse.socket"
+      note "   restart later with: systemctl --user start pipewire"
+      note "   or aim at the other card: $0 benchpcm hw:1"
+    elif printf '%s' "$err" | grep -qiE "no such|cannot find"; then
+      note "=> the slave device does not exist; check aplay -l"
+    fi
+  fi
 }
 
 cmd_benchpcm() {
