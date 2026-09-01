@@ -164,13 +164,18 @@ LOST, owner sign-off required at trigger time:
   the full CLI is device-name/api-key/ws/pair/single-track/
   initial-volume/pipewire-device/data-dir/cache-size/verbose — no
   quality flag; the options object has shuffle/repeat/speed/modes but
-  no quality; like a real Connect device, quality likely follows the
-  account's app setting — bench item). The fork pins bitrate: 160 as a
-  2.4GHz-radio decision, so losing the knob reads as a regression — but
-  it is SOFTENED by the proven whole-file cache: the 160-pin saved
-  radio DURING playback, whereas Soloist bursts the whole file then
-  plays from disk, so a replay-heavy kid pays a one-time burst per
-  item, not a steady stream, whatever the bitrate.
+  no quality). RESOLVED ON DISK 2026-09-01: quality follows the
+  account's **DOWNLOAD** setting, not the stream setting — the owner's
+  app is 320 for wifi streaming but Normal for downloads, and the cache
+  files compute to ~160 kbps (a 3-min song ~3-4MB, 320 excluded — that
+  would be ~7MB). Soloist treats itself as a DOWNLOADING client (it
+  fetched a whole 157-min episode from ~30s of play), so it inherits
+  "Download quality". Consequences, all good: the fork's bitrate:160
+  knob is NOT lost, just moved to the app (set the son's account's
+  download quality: Low ~96 / Normal ~160 / High ~320); and it is the
+  RIGHT knob for a radio-frugal box. Radio math beats the fork's:
+  160 in one burst + play-from-disk, not a steady 160 stream, and
+  replays cost zero radio.
 
 ## Bench spike protocol (merged, kill-risk order — a scripted day on a spare Pi)
 
