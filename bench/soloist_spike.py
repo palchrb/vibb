@@ -347,6 +347,26 @@ def t7_probes(ws):
     cmd(ws, "pause")
 
 
+def normalize_uri(link):
+    """Accept a share link straight from the Spotify app —
+    https://open.spotify.com/playlist/ABC?si=... — or a bare
+    spotify:playlist:ABC uri, and return the uri form."""
+    if not link:
+        return link
+    link = link.strip()
+    if link.startswith("spotify:"):
+        return link.split("?")[0]
+    if "open.spotify.com" in link:
+        path = link.split("open.spotify.com/", 1)[1].split("?")[0]
+        parts = [p for p in path.split("/") if p]
+        # intl-xx/ prefixes appear in some app links
+        if parts and parts[0].startswith("intl-"):
+            parts = parts[1:]
+        if len(parts) >= 2:
+            return f"spotify:{parts[0]}:{parts[1]}"
+    sys.exit(f"unrecognized spotify link/uri: {link!r}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ws", default="127.0.0.1:3690")
@@ -357,6 +377,9 @@ def main():
     ap.add_argument("--collection")
     ap.add_argument("--walk-depth", type=int, default=8)
     args = ap.parse_args()
+    for name in ("big_playlist", "small_playlist", "show", "artist",
+                 "collection"):
+        setattr(args, name, normalize_uri(getattr(args, name)))
     host, port = args.ws.rsplit(":", 1)
 
     ws = WS(host, int(port))
