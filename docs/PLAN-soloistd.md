@@ -23,6 +23,17 @@ go-librespot on a bench Pi (device_auth if zeroconf refuses), press
 play, watch for `audio key error`. THAT result decides whether this
 whole plan stays parked.
 
+**ANSWERED IN THE FIELD (owner, 2026-09-01): the test already ran and
+FAILED.** The son's regular adult account on the owner's Premium
+Family plan gets the audio-key error via normal zeroconf on
+go-librespot. Family Premium does not clear the cutoff — the account's
+CREATION DATE is what matters. The trigger for this plan is therefore
+REAL for the son's account; what keeps it parked now is only the bench
+spike (kill criteria above) and the owner's call on timing. Silver
+lining kept from the account model: his family-member account holds
+Premium, so he can generate his OWN Soloist API key, and Premium means
+NO ADS — two of the sign-off items soften for this household.
+
 ## The honest disagreement, and what settles it
 
 The ARCHITECT and CODER judge the two hardest gaps emulatable; QA calls
