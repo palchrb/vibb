@@ -438,7 +438,24 @@ def main():
     ap.add_argument("--walk-depth", type=int, default=8)
     ap.add_argument("--cache-dir", help="soloist's -C dir, enables the "
                     "disk-based cache-fill test")
+    ap.add_argument("--data-dir", help="soloist's -D dir; the Liked Songs "
+                    "(collection) URI is auto-derived from the account id "
+                    "stored there when --collection is not given")
     args = ap.parse_args()
+    if not args.collection and args.data_dir:
+        # the account's own user id is on disk under the data dir
+        # (<data-dir>/cache/Users/<id>-user); a hardcoded foreign id
+        # would just REFUSE and mislead the verdict
+        import glob
+        hits = glob.glob(os.path.join(args.data_dir, "cache", "Users",
+                                      "*-user"))
+        if hits:
+            uid = os.path.basename(hits[0])[:-len("-user")]
+            args.collection = f"spotify:user:{uid}:collection"
+            print(f"  derived collection uri for account {uid}")
+        else:
+            print("  (no account id found under --data-dir; collection "
+                  "test will SKIP)")
     for name in ("big_playlist", "small_playlist", "show", "artist",
                  "collection"):
         setattr(args, name, normalize_uri(getattr(args, name)))
