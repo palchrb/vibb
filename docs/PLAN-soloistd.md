@@ -143,6 +143,19 @@ whoever repeats this: the HDMI/card-busy noise on a desktop Pi is an
 artifact (session PipeWire owns the cards, vc4hdmi is picky) — the
 `null` slave separates that noise from the real finding.
 
+**3d. FULL PIPEWIRE ASSESSED AND DEFERRED (architect + QA,
+2026-09-01) — see docs/NOTES-audio-stack.md.** The owner's question
+(is the shim only needed because we keep bluealsa?) was right: PipeWire
+does BT natively and the end state IS simpler. But the round found a
+kids-SAFETY blocker (WirePlumber's stream-rescue moves orphaned streams
+to the HAT, bypassing the volume cap that vibb applies only at spawn
+and retarget — the "blasting next to a kid wearing dead headphones"
+case the owner banned), that WirePlumber is MANDATORY for native BT so
+the scoped containment is unavailable, and ~950 lines across 12 files
+plus a month of soak in the layer whose crash model is still open.
+Verdict: NOT NOW; revisit at a hardware generation. THE NEXT ACTION IS
+STILL THE UNRUN PULSE TEST (option 1 in the notes).
+
 **3c. The Pulse half is UNTESTED and this bench cannot test it.**
 `pactl` on the desktop bench talks to pipewire-pulse, which
 deliberately omits `module-alsa-sink` — so "load-module failed" there
