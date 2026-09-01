@@ -26,6 +26,8 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "pi"))
 os.environ["VIBB_RUN"] = tempfile.mkdtemp()
+os.environ["VIBB_SONOS_SEEK_SPACING"] = "0.15"  # test-sized pacing —
+#   the PATTERN is under test (12), the field constant is 0.7
 
 import daemon  # noqa: E402
 
@@ -194,6 +196,47 @@ finally:
 #     token file is unreadable a screen where volume works and seek 401s
 assert "/seek" in daemon.SAFE["POST"], daemon.SAFE["POST"]
 print("11. /seek is in the open POST set beside /volume OK")
+
+# 12. the seek worker PACES the speaker (review 2026-09-01): a mash of
+#     targets becomes posts spaced >= SONOS_SEEK_SPACING_S apart, and
+#     the LAST target always lands — the throttle bounds the SOAP rate
+#     for clients without the UI's own poster (PWA, API).
+rec = Recorder()
+install(rec, is_sonos=True)
+o = mk(source="sonos")
+o.sonos_snap = {"armed": True, "ours": True, "transport": "PLAYING",
+                "rel_s": 100.0, "dur_s": 3600.0, "uri": "u"}
+o.sonos_snap_at = time.time and daemon.time.monotonic()
+o.sonos_opt_pos = None
+STAMPED = []
+_orig_post = daemon._renderer.post
+
+
+def stamping_post(path, body=None, timeout=None):
+    if path == "/seek":
+        STAMPED.append((daemon.time.monotonic(), body["s"]))
+        return 200, {"ok": True}
+    return _orig_post(path, body, timeout)
+
+
+daemon._renderer.post = stamping_post
+daemon._renderer.read = lambda: {"renderer": "sonos", "uid": "U"}
+for tgt in (200, 300, 400, 500):
+    o.seek(position=tgt)
+    daemon.time.sleep(0.02)
+for _ in range(100):
+    if not o._sonos_seeking:
+        break
+    daemon.time.sleep(0.02)
+daemon._renderer.post = _orig_post
+gaps = [b - a for (a, _x), (b, _y) in zip(STAMPED, STAMPED[1:])]
+assert all(g >= 0.14 for g in gaps), \
+    f"posts must be spaced by the worker: {gaps}"
+assert STAMPED[-1][1] == 500.0, \
+    f"the LAST target must land whatever was coalesced: {STAMPED}"
+assert len(STAMPED) < 4, \
+    f"a mash must coalesce, not drain 1:1: {len(STAMPED)}"
+print("12. the sonos seek worker paces the speaker, last target lands OK")
 
 print("\nSEEK ROUTES OK — absolute everywhere, clamped short of the end, "
       "and a sonos room never leaks a seek to another player.")

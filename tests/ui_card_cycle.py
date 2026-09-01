@@ -39,6 +39,9 @@ os.environ.setdefault("VIBB_UI_PNG", "/dev/null")
 os.environ["VIBB_EMOJI"] = "0"
 
 import ui  # noqa: E402
+
+ui.SEEK_POST_MIN_S = 0.02   # test pacing — the pattern is under test,
+#                             not the field constant
 from PIL import Image  # noqa: E402
 
 POSTS, GETS = [], []
@@ -136,7 +139,7 @@ app.handle_now("x")                      # -> seek
 app.handle_now("y")
 settle(1)
 assert POSTS and POSTS[-1][0] == "/seek", POSTS
-assert POSTS[-1][1]["position"] == 630.0, POSTS[-1]   # 600 + first step
+assert POSTS[-1][1]["position"] == 615.0, POSTS[-1]   # 600 + one 15s tap
 app.handle_now("x")                      # -> shuffle
 POSTS.clear()
 app.handle_now("y")
@@ -213,47 +216,195 @@ try:
 finally:
     ui.time.monotonic = real_mono
 
-# 9. seek steps GROW while the presses keep coming, and a reversal
-#    resets them — overshoot by five minutes and press back, you land
-#    30s away rather than another five minutes away
+# 9. TAPS ARE UNIFORM (owner design 2026-09-01): every tap is 15s, no
+#    matter how many or how fast — the old per-press ladder reached
+#    120s in three quick taps, a surprise jump on every short song.
+#    The single-flight poster coalesces: first target immediately,
+#    then the latest — intermediate targets may never hit the wire,
+#    so assert the COMPOUNDED END STATE, not every post.
 POSTS.clear()
 app = app_now()
 app.handle_now("x")
 app.handle_now("x")                      # seek card
 for _ in range(3):
     app.handle_now("y")
-settle(3)
+for _ in range(80):
+    if app._pos_expect == 645.0 and not app._seek_dirty \
+            and not app._seek_posting:
+        break
+    time.sleep(0.02)
+assert app._pos_expect == 645.0, \
+    f"three taps must travel exactly 3x15s: {app._pos_expect}"
 steps = [p[1]["position"] for p in POSTS if p[0] == "/seek"]
-assert steps == [630.0, 690.0, 810.0], steps    # +30, +60, +120
-app.handle_now("b")                      # reversal
-settle(4)
+assert steps[0] == 615.0 and steps[-1] == 645.0, steps
+assert all(a < b for a, b in zip(steps, steps[1:])), \
+    f"the posted targets must never move backward: {steps}"
+app.handle_now("b")                      # reversal: minus ONE tap
+for _ in range(80):
+    if not app._seek_dirty and not app._seek_posting:
+        break
+    time.sleep(0.02)
 back = [p[1]["position"] for p in POSTS if p[0] == "/seek"][-1]
-assert back == 780.0, f"a reversal must start over at 30s, got {back}"
-assert app.seek_step_i == 0
-print("9. seek accelerates, and a reversal starts over small OK")
+assert back == 630.0, f"a reversal is one 15s tap back, got {back}"
+print("9. taps are uniform 15s; poster coalesces, never backward OK")
 
-# 9b. AND THE LADDER SURVIVES CONFIRMATION. Every press opens a 0.3s
-#     burst window and a held seek repeats at 0.35s, so a landed jump is
-#     confirmed BETWEEN presses almost every time. Resetting the ladder
-#     there meant the acceleration could never build: a held seek stayed
-#     at 30s forever, which on an 11-hour audiobook is ~660 presses to
-#     reach the middle instead of ~69 (QA 2026-08-14).
+# 9b. THE HOLD LADDER: acceleration keys off time-since-hold-start,
+#     never press count. Driven directly through _seek_press(held=True)
+#     under a frozen clock — the repeat pin's own cadence is pinned by
+#     test 9c's machinery, the LADDER is what's under test here. Also:
+#     the mid-hold confirmation trap (QA 2026-08-14) is gone by
+#     construction — nothing between repeats touches _seek_hold_t0.
+POSTS.clear()
+app = app_now()
+# an audiobook-length track: the ladder itself is under test here, so
+# the dur/12 clamp (own test, 9e) must stay out of the way — with the
+# harness's 1800s track it would rightly cap the 300 rung at 150
+app._set("status", {**app.status, "duration": 28800.0})
+app.handle_now("x")
+app.handle_now("x")                      # seek card
+T9 = [2000.0]
+real_mono9 = ui.time.monotonic
+ui.time.monotonic = lambda: T9[0]
+try:
+    app._seek_press(+1)                  # the fresh press: a 15s tap
+    assert app.seek_shown == 15.0, app.seek_shown
+    T9[0] += 1.0                         # held 1.0s: still tap-size
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 15.0, app.seek_shown
+    T9[0] += 1.0                         # held 2.0s: 45s rung
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 45.0, app.seek_shown
+    T9[0] += 2.5                         # held 4.5s: 120s rung
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 120.0, app.seek_shown
+    T9[0] += 4.0                         # held 8.5s: 300s rung
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 300.0, app.seek_shown
+    # a mid-hold confirmation must not reset the climb
+    app._set("status", {**app.status, "position": app._pos_expect})
+    T9[0] += 0.35
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 300.0, \
+        "confirmation between repeats must not reset the hold clock"
+    # reversal mid-hold: back to tap size (the "I overshot" rule)
+    T9[0] += 0.35
+    app._seek_press(-1, held=True)
+    assert app.seek_shown == -15.0, app.seek_shown
+finally:
+    ui.time.monotonic = real_mono9
+for _ in range(100):                     # drain THIS app's poster —
+    if not app._seek_posting:            # later tests count in-flight
+        break                            # posts globally
+    time.sleep(0.01)
+print("9b. hold time climbs the ladder; confirmation never resets it OK")
+
+# 9e. THE DURATION CLAMP: a step never exceeds ~8% of the track — a
+#     3-minute song stays at tap size even deep into a hold (the
+#     step-only clamp still teleported it, QA 2026-09-01).
+app = app_now()
+app._set("status", {**app.status, "duration": 180.0, "position": 60.0})
+app.handle_now("x")
+app.handle_now("x")
+T9 = [3000.0]
+ui.time.monotonic = lambda: T9[0]
+try:
+    app._seek_press(+1)
+    T9[0] += 9.0                         # deep hold: ladder says 300
+    app._seek_press(+1, held=True)
+    assert app.seek_shown == 15.0, \
+        f"a 180s track must cap the step at tap size: {app.seek_shown}"
+finally:
+    ui.time.monotonic = real_mono9
+for _ in range(100):                     # drain THIS app's poster —
+    if not app._seek_posting:            # later tests count in-flight
+        break                            # posts globally
+    time.sleep(0.01)
+print("9e. dur/12 clamp keeps short songs at tap size OK")
+
+# 9f. THE ADOPTION SEAM (QA's rig, review 2026-09-01): the daemon's
+#     response is DELAYED past further compounding — the echoed clamp
+#     for target N arrives after targets N+1.. exist. The old per-press
+#     go() adopted it unconditionally and REWOUND the bar mid-hold; the
+#     single-flight poster may adopt only when nothing newer is dirty.
+#     Also pinned: never two posts in flight, and the FINAL compounded
+#     target always reaches the wire.
+import threading as _th
+
+SLOW = {"on": False, "inflight": 0, "max_inflight": 0}
+_real_fake_post = fake_post
+
+
+def slow_post(p, b=None, timeout=None):
+    if p != "/seek" or not SLOW["on"]:
+        return _real_fake_post(p, b, timeout)
+    SLOW["inflight"] += 1
+    SLOW["max_inflight"] = max(SLOW["max_inflight"], SLOW["inflight"])
+    time.sleep(0.15)               # answer AFTER more repeats compounded
+    SLOW["inflight"] -= 1
+    return _real_fake_post(p, b, timeout)
+
+
+ui.api_post = slow_post
+SLOW["on"] = True
+POSTS.clear()
+app = app_now()
+app._set("status", {**app.status, "duration": 28800.0})
+app.handle_now("x")
+app.handle_now("x")                      # seek card
+bars = []
+app._seek_press(+1)                      # tap -> first post (slow)
+bars.append(app._pos_expect)
+for _ in range(6):                       # repeats land DURING the post
+    time.sleep(0.05)
+    app._seek_press(+1, held=True)
+    bars.append(app._pos_expect)
+for _ in range(100):
+    if not app._seek_dirty and not app._seek_posting:
+        break
+    time.sleep(0.02)
+SLOW["on"] = False
+ui.api_post = _real_fake_post
+assert all(a < b for a, b in zip(bars, bars[1:])), \
+    f"the bar must NEVER move backward mid-hold: {bars}"
+assert SLOW["max_inflight"] == 1, \
+    f"single-flight means ONE post in the air, saw {SLOW['max_inflight']}"
+final_posted = [b["position"] for pth, b in POSTS if pth == "/seek"][-1]
+assert final_posted == bars[-1], \
+    f"the final compounded target must land: {final_posted} != {bars[-1]}"
+print("9f. delayed responses never rewind the bar; final target lands OK")
+
+# 9g. a refusal clears the dirty flag — no doomed re-post after
+#     "Can't seek here", even when targets compounded behind it
+def refuse_post(p, b=None, timeout=None):
+    POSTS.append((p, b))
+    return {"routed": None}
+
+
+ui.api_post = refuse_post
 POSTS.clear()
 app = app_now()
 app.handle_now("x")
-app.handle_now("x")                      # seek card
-steps = []
-for _ in range(3):
-    app.handle_now("y")
-    settle(len(steps) + 1)
-    tgt = POSTS[-1][1]["position"]
-    steps.append(tgt)
-    # the poller confirms the jump landed, exactly as it would in life
-    app._set("status", {**app.status, "position": tgt})
-    assert app._pos_expect is None, "a landed jump must be accepted"
-assert steps == [630.0, 690.0, 810.0], \
-    f"confirmation must not reset the ladder, got {steps}"
-print("9b. an acknowledged jump keeps the acceleration building OK")
+app.handle_now("x")
+app._seek_press(+1)
+app._seek_press(+1, held=True)           # compounds behind the refusal
+for _ in range(100):
+    if not app._seek_posting:
+        break
+    time.sleep(0.02)
+seeks = [pth for pth, _b in POSTS if pth == "/seek"]
+# a press that lands BEFORE the refusal is known may legitimately post
+# (and be refused too) — the contract is no posting AFTER the refusal
+# settles, not exactly-one
+assert len(seeks) <= 2, \
+    f"a refusal must kill the queue, not drain it: {len(seeks)} posts"
+assert app.seek_refused and app._pos_expect is None
+assert not app._seek_dirty and not app._seek_posting
+n = len(seeks)
+time.sleep(0.2)
+assert len([pth for pth, _b in POSTS if pth == "/seek"]) == n, \
+    "no zombie post may fire after the refusal settled"
+ui.api_post = _real_fake_post
+print("9g. a refusal clears the queue — no zombies after it settles OK")
 
 # 9c. A HELD B/Y BELONGS TO THE CARD, and must never ALSO fire the
 #     navigation it means when no card is up. Holding is exactly the

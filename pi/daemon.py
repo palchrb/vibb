@@ -254,6 +254,11 @@ PREV_RESTART_MAX_S = float(os.environ.get("VIBB_PREV_RESTART_MAX", "1800"))
 BM_HOLD_MAX_S = float(os.environ.get("VIBB_BM_HOLD_MAX", "120"))
 SONOS_SEEK_TOL_S = float(os.environ.get("VIBB_SONOS_SEEK_TOL", "6"))
 SONOS_SEEK_HOLD_S = float(os.environ.get("VIBB_SONOS_SEEK_HOLD", "12"))
+# Minimum spacing between seek SOAPs at the speaker — defense in depth
+# behind the UI's own single-flight poster (PWA/API clients have no
+# poster). Latest-target-wins already guarantees the final seek lands.
+SONOS_SEEK_SPACING_S = float(os.environ.get("VIBB_SONOS_SEEK_SPACING",
+                                            "0.7"))
 BM_RESTART_FLOOR_S = float(os.environ.get("VIBB_BM_RESTART_FLOOR", "90"))
 # ...and only when there was something substantial to lose.
 BM_REGRESS_MIN_S = float(os.environ.get("VIBB_BM_REGRESS_MIN", "300"))
@@ -2052,6 +2057,11 @@ class Orchestrator:
                 pass      # the poller re-reads the truth within a beat
             _sonos_wake.set()
             _bm_wake.set()
+            # pace OUTSIDE the lock (it is the shared queue mutex for
+            # steps too — sleeping under it would block next/prev and
+            # every /seek handler); a trailing sleep before exit is
+            # harmless, and latest-wins keeps the final target intact
+            time.sleep(SONOS_SEEK_SPACING_S)
 
     def _sonos_command(self, action):
         """Transport controls for the remote renderer. Runs OFF the lock:

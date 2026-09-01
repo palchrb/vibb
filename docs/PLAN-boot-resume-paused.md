@@ -755,6 +755,14 @@ independent and de-risk B2), then B2. Both suites green before field.
 
 # PART 5: seek — uniform tap, intent-based hold acceleration, bounded verb rate
 
+> **IMPLEMENTED 2026-09-01**, as amended by the review round below.
+> ui: SEEK_TAP_S/SEEK_HOLD_LADDER/dur-12 clamp/SEEK_TAIL_S mirror, the
+> held= plumbing (parameter, only the repeat pin passes True), and the
+> single-flight `_seek_poster`. daemon: SONOS_SEEK_SPACING_S in the
+> seek worker, outside the shared lock. Tests: ui_card_cycle 9/9b/9e/
+> 9f (the delayed-response adoption rig)/9g, seek_routes 12. Suite
+> green, 153 files. Field tuning of the four constants awaits the son.
+
 Owner design (2026-09-01, refined together): a TAP is 15s, always, on
 every content type — one rule for muscle memory. HOLDING the button is
 the declaration of intent to travel: acceleration keys off TIME SINCE

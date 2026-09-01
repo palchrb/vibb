@@ -584,7 +584,19 @@ CARD_TTL_S = 5.0   # the card lives this long past the last press. Three
 #                    unreachable rather than merely slow (QA 2026-08-14).
 #                    The price is real and deliberate: B/Y are not
 #                    prev/next for those five seconds.
-SEEK_STEPS = (30, 60, 120, 300)  # grows while the presses keep coming
+SEEK_TAP_S = 15.0       # a TAP, every tap, on every content type
+# Holding is the declaration of intent to travel: the step grows with
+# TIME SINCE THE HOLD STARTED, never with press count — rapid taps stay
+# 15s forever (owner design 2026-09-01; the old per-press ladder hit
+# 120s within three quick taps, a surprise jump on every short song).
+# (held longer than s, step becomes s-of-content). Travel rates at the
+# 0.35s repeat: ~43/129/343/857 s per held second.
+SEEK_HOLD_LADDER = ((1.5, 45.0), (4.0, 120.0), (8.0, 300.0))
+SEEK_POST_MIN_S = 0.7   # single-flight poster pacing: the bar compounds
+#                         per repeat, the NETWORK sees at most ~1.4/s
+SEEK_TAIL_S = 5.0       # mirror of the daemon's end clamp — without it
+#                         the echoed clamp pulls back 5s per adoption
+#                         and the next repeat pushes past it again
 CARD_REPEAT_S = 0.35   # hold B/Y on a card: the repeat cadence
 SEEK_RECONCILE_S = 4.0  # hold the optimistic position until a poll lands
 SEEK_TOL_S = 2.0        # a report this close to the target = it landed
@@ -1399,7 +1411,11 @@ class App:
         self.volume_shown = None
         self.vol_mode_until = 0.0   # while set: a card is up and owns B/Y
         self.card_idx = 0           # which tab of CARDS that card shows
-        self.seek_step_i = 0        # index into SEEK_STEPS (accelerating)
+        self._seek_hold_t0 = 0.0    # when the current HOLD began
+        self._seek_post_lock = threading.Lock()
+        self._seek_dirty = False    # a compounded target awaits posting
+        self._seek_posting = False  # the single-flight poster is alive
+        self._seek_last_post = -1e9
         self.seek_dir = 0           # -1/+1 of the last seek press
         self.seek_shown = None      # the step just applied, for the card
         self.seek_refused = False   # a seek the box could not do
@@ -1475,7 +1491,7 @@ class App:
                 # a different book/episode: drop the expectation AND the
                 # ladder, since the next press is a fresh piece of audio
                 self._pos_expect = None
-                self.seek_dir, self.seek_step_i = 0, 0
+                self.seek_dir, self._seek_hold_t0 = 0, 0.0
             elif now >= self._pos_until or landed:
                 # Confirmed or expired: accept the truth, but LEAVE THE
                 # LADDER ALONE. Confirmation is the normal case and it
@@ -2099,14 +2115,19 @@ class App:
         if CARDS[self.card_idx] == "vol":
             self._volume_mode(delta=None)   # re-read the number
         else:
-            self.seek_dir, self.seek_step_i = 0, 0   # a fresh visit
+            self.seek_dir, self._seek_hold_t0 = 0, 0.0  # a fresh visit
             self.seek_shown = None           #   to seek starts slow
 
-    def _card_step(self, sign):
-        """B and Y, meaning whatever the showing card says they mean."""
+    def _card_step(self, sign, held=False):
+        """B and Y, meaning whatever the showing card says they mean.
+        held=True comes from ONE caller — the main loop's repeat pin —
+        and only the seek press consumes it. A parameter on purpose:
+        reading self._card_repeat here would race a quick release-retap
+        into "held" (the pin-clear runs before event dispatch in the
+        same loop pass) — the surprise-jump class this exists to kill."""
         card = self._card()
         if card == "seek":
-            self._seek_press(sign)
+            self._seek_press(sign, held=held)
         elif card == "shuf":
             # OFF on B, ON on Y — not a toggle. Spatially the same as
             # the -/+ above it, and idempotent: a child mashing Y cannot
@@ -2140,40 +2161,87 @@ class App:
         0:00 would sit masked behind a stale 12:34."""
         return (st.get("target"), st.get("episode_id") or st.get("title"))
 
-    def _seek_press(self, dirn):
-        """One seek step, growing while the presses keep coming.
+    def _seek_press(self, dirn, held=False):
+        """One seek step: a TAP is SEEK_TAP_S, always; only a HOLD
+        accelerates, by time since the hold began (SEEK_HOLD_LADDER).
+        A reversal restarts the hold clock — "I overshot" lands 15s
+        away, not another five minutes away.
 
         The base is our OWN last commanded target, never the reported
         position: /status is a second behind (fifteen on a sonos
         renderer), so basing step N on the poll gives 'every press does
         nothing, then one works' — the lesson the sonos volume optimism
         already records from 2026-08-09. Absolute targets are what let
-        the presses compound at all; the daemon does the clamping."""
+        the presses compound at all."""
         st = self.status or {}
-        if dirn != self.seek_dir:
-            self.seek_step_i = 0   # a reversal means "I overshot" —
-            #   land 30s away, not another five minutes away
-        elif self.seek_dir:
-            self.seek_step_i = min(self.seek_step_i + 1, len(SEEK_STEPS) - 1)
+        now = time.monotonic()
+        if not held or dirn != self.seek_dir:
+            self._seek_hold_t0 = now   # fresh press or reversal: tap-size
         self.seek_dir = dirn
-        step = SEEK_STEPS[self.seek_step_i]
-        self.seek_shown = dirn * step
-        self._card_touch()
+        step = SEEK_TAP_S
+        if held:
+            for since, grown in SEEK_HOLD_LADDER:
+                if now - self._seek_hold_t0 > since:
+                    step = grown
         dur = st.get("duration")
         if dur is None:            # live stream: no duration, nowhere to go
+            self.seek_shown = dirn * step
+            self._card_touch()
             self.seek_refused = True
             return
-        base = self._pos_expect if self._pos_expect is not None \
-            else (st.get("position") or 0.0)
-        target = max(0.0, min(float(base) + dirn * step, float(dur)))
-        self._pos_expect = target
+        # a step never exceeds ~8% of the track (QA 2026-09-01: a
+        # step-only clamp still teleported a 3-min song — this bounds
+        # the TRAVEL RATE): a short song stays at tap size for life,
+        # a 10-min podcast tops near 50s, audiobooks are untouched
+        step = min(step, max(SEEK_TAP_S, float(dur) / 12.0))
+        self.seek_shown = dirn * step
+        self._card_touch()
+        with self._seek_post_lock:
+            base = self._pos_expect if self._pos_expect is not None \
+                else (st.get("position") or 0.0)
+            # SEEK_TAIL_S mirrors the daemon's end clamp: without it the
+            # echoed clamp and the next repeat fight over the last 5s
+            target = max(0.0, min(float(base) + dirn * step,
+                                  float(dur) - SEEK_TAIL_S))
+            self._pos_expect = target
+            self._seek_dirty = True
+            spawn = not self._seek_posting
+            if spawn:
+                self._seek_posting = True
         self._pos_at = time.monotonic()
         self._pos_until = self._pos_at + SEEK_RECONCILE_S
         self._pos_key = self._track_key(st)
         self.status = {**st, "position": target}
         self.poll_burst_until = self._pos_at + 3
+        if spawn:
+            threading.Thread(target=self._seek_poster,
+                             daemon=True).start()
 
-        def go():
+    def _seek_poster(self):
+        """The single-flight seek sender (QA round 2026-09-01) — the
+        _sonos_seek_worker pattern one layer up. ONE post in flight,
+        latest compounded target wins, paced at SEEK_POST_MIN_S, and it
+        protects every upstream at once: the sonos sidecar, go-librespot
+        (a slow spotify round can no longer be overtaken by a newer one
+        — ordering by construction), and mpv. The daemon's echoed clamp
+        is adopted ONLY when no newer target is dirty (adopting between
+        repeats rewound the bar mid-hold), and a refusal clears the
+        dirty flag so no doomed re-post follows 'Can't seek here'.
+        Exits when the queue is drained — the final target of a hold
+        always lands, whatever ended the hold."""
+        while True:
+            wait = self._seek_last_post + SEEK_POST_MIN_S \
+                - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            with self._seek_post_lock:
+                if not self._seek_dirty or self._pos_expect is None:
+                    self._seek_dirty = False
+                    self._seek_posting = False
+                    return
+                self._seek_dirty = False
+                target = float(self._pos_expect)
+            self._seek_last_post = time.monotonic()
             try:
                 r = api_post("/seek", {"position": target},
                              timeout=CONTROL_TIMEOUT)
@@ -2181,18 +2249,25 @@ class App:
                 log(f"seek failed: {e}")
                 r = None
             if not isinstance(r, dict) or r.get("routed") is None:
-                self._pos_expect = None   # let the truth back in at once
+                with self._seek_post_lock:
+                    self._pos_expect = None  # let the truth back in
+                    self._seek_dirty = False
                 self.seek_refused = True
             elif r.get("position") is not None:
-                # adopt the daemon's number: it carries the end-clamp, so
-                # the card cannot claim a spot past the end of the track
-                self._pos_expect = float(r["position"])
-                self._pos_at = time.monotonic()
-                self.status = {**(self.status or {}),
-                               "position": self._pos_expect}
-                self.dirty = True
+                adopted = False
+                with self._seek_post_lock:
+                    if not self._seek_dirty \
+                            and self._pos_expect is not None:
+                        # the daemon's number carries the end clamp —
+                        # but a newer compounded target outranks it
+                        self._pos_expect = float(r["position"])
+                        adopted = True
+                if adopted:
+                    self._pos_at = time.monotonic()
+                    self.status = {**(self.status or {}),
+                                   "position": self._pos_expect}
+                    self.dirty = True
             self._force_poll()
-        threading.Thread(target=go, daemon=True).start()
 
     def _set_shuffle(self, want):
         """The shuffle card's B/Y: shuffle off or on.
@@ -3987,7 +4062,7 @@ class App:
                         or ("b" if dirn < 0 else "y") not in self.inputs.down:
                     self._card_repeat = None
                 elif time.monotonic() >= at:
-                    self._card_step(dirn)
+                    self._card_step(dirn, held=True)
                     self._card_repeat = (dirn,
                                          time.monotonic() + CARD_REPEAT_S)
             if self.shuffle_refused or self.seek_refused:
