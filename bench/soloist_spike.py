@@ -225,8 +225,7 @@ def t1_resume_walk(ws, playlist, target_index=8):
 
 def t1b_paused_skips(ws, playlist):
     print("\n== KILL 1b: do skips fire while PAUSED at all?")
-    cmd(ws, "play", uri=playlist)
-    wait_for(ws, "track_changed", 15)
+    cmd(ws, "play", uri=playlist, wait_event="track_changed", wait_s=15)
     cmd(ws, "pause")
     _st, before = current_item(ws)
     r, ev = cmd(ws, "skip_next", wait_event="track_changed", wait_s=8)
@@ -242,8 +241,7 @@ def t1b_paused_skips(ws, playlist):
 
 def t2_queue_truth(ws, uri, label, expect_hint):
     print(f"\n== KILL 2: get_queue(limit=0) truth for {label}")
-    cmd(ws, "play", uri=uri)
-    wait_for(ws, "track_changed", 15)
+    cmd(ws, "play", uri=uri, wait_event="track_changed", wait_s=15)
     cmd(ws, "pause")
     ws.send_json({"type": "command", "command": "get_queue", "limit": 0})
     q = wait_for(ws, "queue_changed", 15) or {}
@@ -274,9 +272,8 @@ def t4_mash(ws):
         if e.get("type") == "error":
             errors.append(e)
     _st, uri = current_item(ws)
-    ok = ask("Did playback recover to a sane state (playing/paused on "
-             "SOME track, no stall)?")
-    record("mash", "PASS" if ok and not errors else
+    ok = uri is not None and not errors
+    record("mash", "PASS" if ok else
            ("ERRORS" if errors else "STALLED"),
            duration_s=round(time.monotonic() - t0, 1),
            error_frames=errors[:5], event_count=len(events),
@@ -306,26 +303,56 @@ def t5_uris(ws, uris):
 
 # --- cache-fill semantics (the warming hinge) --------------------------------
 
-def t6_cache_fill(ws, small_playlist):
-    print("\n== WARMING HINGE: whole-file or chunked cache fill?")
-    cmd(ws, "play", uri=small_playlist)
-    wait_for(ws, "track_changed", 15)
-    print("  Playing the first track. Let it play ~5 seconds...")
+def _du(path):
+    total = 0
+    for root, _d, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def t6_cache_fill_disk(ws, show_uri, cache_dir):
+    """Objective cache-fill semantics: no ears, no network-pulling.
+    Requires soloist started WITH a cache dir (-C ./cache -z 500) —
+    without -C there may be NO cache at all, and the old
+    disconnect-and-listen variant silently measured nothing.
+
+    Method: play ~5s of a LONG episode (hours = hundreds of MB whole),
+    pause, watch the cache dir grow. Bytes written >> 5s-of-audio
+    (~0.2MB) means whole-file/aggressive prefetch -> warming is
+    seconds per track. Bytes ~= the played window means chunked ->
+    warming is real-time only."""
+    print("\n== WARMING HINGE (disk-based): whole-file or chunked?")
+    if not cache_dir or not os.path.isdir(cache_dir):
+        record("cache_fill", "SKIPPED",
+               reason="--cache-dir missing or not a directory; restart "
+                      "soloist with -C ./cache -z 500 and pass "
+                      "--cache-dir ./cache")
+        return
+    base = _du(cache_dir)
+    uri = show_uri
+    if not uri:
+        record("cache_fill", "SKIPPED", reason="needs --show")
+        return
+    cmd(ws, "play", uri=uri, wait_event="track_changed", wait_s=15)
     time.sleep(5)
     cmd(ws, "pause")
-    print("  [operator] NOW: disconnect the Pi's internet (pull wifi/"
-          "ethernet), then press Enter.")
-    input()
-    cmd(ws, "seek", position_ms=0)
-    cmd(ws, "play")
-    played_whole = ask("Did the track play well PAST the ~5s you "
-                       "originally heard (i.e. from cache, whole file)?")
-    record("cache_fill", "WHOLE-FILE" if played_whole else "CHUNKED",
-           implication=("warming = seconds per track"
-                        if played_whole else
-                        "warming = real-time play-through only"))
-    print("  [operator] Reconnect the network, press Enter.")
-    input()
+    grown = []
+    for _ in range(6):            # give a prefetcher 30s to show itself
+        time.sleep(5)
+        grown.append(_du(cache_dir) - base)
+    delta = grown[-1]
+    verdict = ("NO-CACHE-WRITTEN" if delta < 50_000 else
+               "WHOLE-FILE" if delta > 5_000_000 else "CHUNKED")
+    record("cache_fill", verdict,
+           bytes_written=delta, growth_curve=grown,
+           implication={"WHOLE-FILE": "warming = seconds per track",
+                        "CHUNKED": "warming = real-time play-through",
+                        "NO-CACHE-WRITTEN":
+                        "no cache with these flags — check -C/-z"}[verdict])
 
 
 # --- shuffle / autoplay / lifecycle probes ----------------------------------
@@ -381,6 +408,8 @@ def main():
     ap.add_argument("--artist")
     ap.add_argument("--collection")
     ap.add_argument("--walk-depth", type=int, default=8)
+    ap.add_argument("--cache-dir", help="soloist's -C dir, enables the "
+                    "disk-based cache-fill test")
     args = ap.parse_args()
     for name in ("big_playlist", "small_playlist", "show", "artist",
                  "collection"):
@@ -403,7 +432,7 @@ def main():
     t4_mash(ws)
     t5_uris(ws, {"show": args.show, "artist": args.artist,
                  "collection": args.collection})
-    t6_cache_fill(ws, args.small_playlist)
+    t6_cache_fill_disk(ws, args.show, args.cache_dir)
     t7_probes(ws)
 
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
