@@ -174,6 +174,14 @@ Bookworm this would have been a plan-level blocker; record it as a
 hard deployment constraint alongside the missing armv6 build. Bench
 setup: flash Trixie (desktop, for PipeWire + audible output) on the
 spare Pi. Spike script: bench/soloist_spike.py.
+   FIELD FINDINGS #2-3 (2026-09-01, bench up via the glibc loader
+   trick on Bookworm): (a) the binary spawns a crashpad crash-handler
+   child by re-exec'ing /proc/self/exe — harmless under the loader
+   trick (the child dies, the daemon runs; no crash telemetry to
+   Spotify), fine on Trixie; (b) startup logs "client expires in N
+   days" in clear text — a BETTER health source for soloistd's
+   days_left than the planned --version stamp parsing: parse the
+   child's own startup line.
 
 1. The resume walk (kill #1): volume-shroud vs paused-skip variants,
    walk latency at N=5/50/300, event traces, throttling.
