@@ -240,9 +240,18 @@ settled most of the board:
   formally. install.sh consequence: cache dir config is optional,
   size cap (-z) is the knob that matters on the box's SD card.
 
-REMAINING before build go/no-go: walk audibility (ears, once),
-disk-based cache fill, collection URI, and the audio-shim question
-(separate rig, needs the scoped-PipeWire config experiment).
+- **CACHE VERDICT SETTLED OBJECTIVELY (disk listing, run 1's own
+  cache): WHOLE-FILE.** Track files at 3.7-6.5MB = full songs; and a
+  91MB file = the 157-minute episode that played for ~30 SECONDS —
+  Soloist fetched ~250x what was heard. The warming feature gets its
+  best case: seconds of play per item caches the whole file; a trip
+  playlist warms in minutes. (28 files/138MB from one spike run also
+  says: the -z size cap is mandatory on the box's SD.)
+
+REMAINING before build go/no-go: walk audibility (ears, once — the
+window is <0.4s of track-1 at volume before the pause lands; the
+show/audiobook path has no walk at all), collection URI, and the
+audio-shim question (separate rig, the scoped-PipeWire experiment).
 
 ## Cache warming — "silent play-through" (owner idea 2026-09-01, ACCEPTED into P2/P3)
 
