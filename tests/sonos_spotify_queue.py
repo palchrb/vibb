@@ -183,3 +183,31 @@ print("6. Liked Songs/shows refuse with a named error OK")
 
 print("\nSONOS SPOTIFY QUEUE OK — vibb owns the logic, the speaker "
       "holds the queue, and the bookmark survives every path.")
+
+# 7. the step coalescer survives a raise — a mash storm queued verbs
+#    past the sidecar timeout, _sonos_play_entry raised SidecarDown,
+#    the worker thread died with _sonos_stepping still True, and every
+#    later next/prev saw "a worker is running" and never spawned one:
+#    next/prev DEAD until a daemon restart (field 2026-09-01, the son
+#    mashing when the music did not start). The worker must drop the
+#    failed step, keep consuming, and exit clean.
+CALLS = []
+
+
+def _boom_then_ok(want, start):
+    CALLS.append(want)
+    if len(CALLS) == 1:
+        raise daemon._renderer.SidecarDown("timed out")
+
+
+orch._sonos_play_entry = _boom_then_ok
+orch._sonos_step_want = 1
+orch._sonos_stepping = True
+orch._sonos_step_worker()          # first want raises...
+assert orch._sonos_stepping is False, \
+    "a raise must never strand the stepping flag — next/prev bricks"
+orch._sonos_step_want = 2
+orch._sonos_stepping = True
+orch._sonos_step_worker()          # ...and the machinery still works
+assert CALLS == [1, 2], f"the failed step is dropped, not fatal: {CALLS}"
+print("7. step coalescer survives SidecarDown, buttons never brick OK")

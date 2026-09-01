@@ -1601,7 +1601,21 @@ class Orchestrator:
                 if want is None:
                     self._sonos_stepping = False
                     return
-            self._sonos_play_entry(want, 0.0)
+            # MUST NOT die: an uncaught raise here exits the thread with
+            # _sonos_stepping still True, and every later next/prev sees
+            # "a worker is running" and never spawns one — next/prev on
+            # sonos is then DEAD until a daemon restart (field 2026-09-01:
+            # a mash storm queued verbs past the sidecar timeout,
+            # _sonos_play_entry raised SidecarDown, and the buttons
+            # bricked mid-session). The seek twin below has carried this
+            # exact guard all along; broad on purpose — a lost step is a
+            # shrug, a dead coalescer is a brick.
+            try:
+                self._sonos_play_entry(want, 0.0)
+            except Exception as e:
+                log(f"sonos step: play_entry failed "
+                    f"({e.__class__.__name__}) — step dropped, "
+                    "coalescer lives on")
 
     def _renderer_to_sonos(self, uid, name):
         """Hand the session to a speaker. Order is load-bearing: capture
