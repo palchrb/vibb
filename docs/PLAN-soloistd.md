@@ -253,6 +253,32 @@ window is <0.4s of track-1 at volume before the pause lands; the
 show/audiobook path has no walk at all), collection URI, and the
 audio-shim question (separate rig, the scoped-PipeWire experiment).
 
+## OPEN: does a 90-day binary swap void the cache? (owner question 2026-09-01)
+
+Undocumented, and it compounds with the never-run offline test. Two
+unknowns, two experiments:
+- **Offline playability:** does cached content play with NO network, or
+  are live DRM keys required per playback regardless (the librespot
+  world's limit)? Test now: daemon up, pull the Pi's network, try to
+  play a track cached in run 1 (e.g. DAISIES). Plays = cache + offline
+  keys; fails = the cache is a BANDWIDTH SHIELD ONLY (still exactly the
+  fork's behavior and still worth it for hotspot trips).
+- **Cross-build survival:** the content-addressed filenames
+  (cache/73/730d...file, SHA-style) SUGGEST keying by Spotify file-id,
+  not client version — which would survive. BUT the 90-day fuse IS key
+  rotation, and if cache files are re-encrypted with a build-embedded
+  key they void on every swap. Only testable at the first real update
+  (the canary step): note the cache, swap the binary, replay an
+  old-cached track, watch `~/.cache/soloist` — growth = voided,
+  quiet = survived.
+
+MITIGATION regardless of outcome (cheap because warming is whole-file =
+minutes): the updater unit re-warms the `cache: N` entries after a
+successful binary swap, gated on charger + home wifi + idle like all
+warming. Quarterly, overnight, invisible to the kid. So even
+worst-case (voided every build) costs one background warm per quarter,
+not a degraded bedtime.
+
 ## Cache warming — "silent play-through" (owner idea 2026-09-01, ACCEPTED into P2/P3)
 
 The proactive precache dies with the fork (no download API in Soloist);
