@@ -1,5 +1,10 @@
 # Audio stack: PipeWire migration — assessed 2026-09-01, VERDICT: NOT NOW
 
+**SUPERSEDED 2026-09-02 (owner decision): build it.** The verdict was
+overruled, the findings were not — every item below is answered in
+`docs/PLAN-pipewire-soloist.md` (architect design + two QA passes).
+This file stays as the record of why the trip is expensive.
+
 Owner asked the sharp question after the shim spike: PipeWire has native
 Bluetooth, so is the shim only needed because we insist on keeping
 bluealsa — and would full PipeWire actually be SIMPLER? Architect + QA

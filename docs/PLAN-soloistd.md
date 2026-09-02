@@ -155,6 +155,10 @@ the scoped containment is unavailable, and ~950 lines across 12 files
 plus a month of soak in the layer whose crash model is still open.
 Verdict: NOT NOW; revisit at a hardware generation. THE NEXT ACTION IS
 STILL THE UNRUN PULSE TEST (option 1 in the notes).
+**OVERRULED 2026-09-02 (owner): full PipeWire + soloistd IS being built —
+`docs/PLAN-pipewire-soloist.md` supersedes §3/§3b/§3c/§3d of this file
+(the shim/PulseAudio path is dead); everything else here stands and is
+its Phase 3.**
 
 **3c. The Pulse half is UNTESTED and this bench cannot test it.**
 `pactl` on the desktop bench talks to pipewire-pulse, which
