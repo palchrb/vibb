@@ -3039,6 +3039,11 @@ class Orchestrator:
             # the field's presence, so this is a clean no-op there. The
             # bt_lost/bt_waiting resume path below is untouched (QA).
             out["bt_connected"] = _bt_transport_ready()
+        if _audio.stack() == "pipewire":
+            # the policy self-test's verdict (ok | fail-safety | fail-rf |
+            # down | pending) — key-guarded like bt_connected, so bluealsa
+            # boxes emit nothing and the UI fold is a no-op there
+            out["audio_policy"] = _audio.selftest_state().get("verdict") or "pending"
         if out["bt_lost"] or out["bt_waiting"]:
             # both speaker popups offer the same escape — A plays on the
             # built-in speaker instead — but only where one exists
@@ -3784,6 +3789,15 @@ class Handler(BaseHTTPRequestHandler):
                         path=body.get("path") or None))
                 except RuntimeError as e:
                     self._send(400, {"error": str(e)})
+            elif self.path == "/audio/selftest":
+                # re-run the policy probes now (pipewire only): ~5s of
+                # silent streams, off the request thread
+                if _audio.stack() != "pipewire":
+                    self._send(409, {"error": "audio-stack-not-pipewire"})
+                else:
+                    threading.Thread(target=_audio_policy_run, args=("request",),
+                                     daemon=True).start()
+                    self._send(202, {"started": True})
             elif self.path == "/backup/now":
                 try:
                     r = _backup.backup_now()
@@ -4708,10 +4722,55 @@ def _bt_recover(verb):
         for line in (r.stdout or "").splitlines():
             if line.strip():
                 log(f"bt-recovery: {line.strip()}")
+        if r.returncode == 0 and _audio.stack() == "pipewire":
+            # the recovery re-attached the radio under WirePlumber: prove
+            # the policy still holds before the next landing (AM-8)
+            threading.Thread(target=_audio_policy_run, args=("bt-recovery",),
+                             daemon=True).start()
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"bluetooth recovery ({verb}) failed: {e!r}")
         return False
+
+
+_AUDIO_POLICY_LOCK = threading.Lock()
+
+
+def _audio_policy_run(why):
+    """One self-test run at a time; a second trigger while one runs is
+    dropped (the running one answers the same question)."""
+    if not _AUDIO_POLICY_LOCK.acquire(blocking=False):
+        return
+    try:
+        log(f"audio policy self-test ({why})")
+        _audio.policy_selftest()
+    except Exception as e:
+        log(f"audio policy self-test failed to run: {e!r}")
+    finally:
+        _AUDIO_POLICY_LOCK.release()
+
+
+def _audio_policy_watch():
+    """pipewire only: wait for the server (<=60s), run the self-test if
+    it is due (never run, or PipeWire restarted = core cookie changed),
+    then watch the cookie once a minute — one pw-dump — and re-run on a
+    restart. A crash-looping daemon never probe-loops: the verdict file
+    outlives the process and 'due' is false while it is fresh."""
+    for _ in range(60):
+        if _audio.server_up():
+            break
+        _tick(1)
+    while True:
+        try:
+            d = _audio.pw_dump()
+            if not d:
+                if _audio.selftest_state().get("verdict") != "down":
+                    _audio.policy_selftest()  # records 'down' (both outputs read not-ready)
+            elif _audio.selftest_due(d):
+                _audio_policy_run("boot" if not _audio.selftest_state() else "pipewire restarted")
+        except Exception as e:
+            log(f"audio policy watch: {e!r}")
+        _tick(_audio.SELFTEST_POLL_S)
 
 
 def _speaker_mac():
@@ -5836,6 +5895,8 @@ def main():
     threading.Thread(target=_spotify_supervisor, daemon=True).start()
     threading.Thread(target=_ip_watchdog, daemon=True).start()
     threading.Thread(target=_portal_server, daemon=True).start()
+    if _audio.stack() == "pipewire":
+        threading.Thread(target=_audio_policy_watch, daemon=True).start()
     # Self-heal: install.sh normally creates this, but a deleted or
     # corrupt file must produce a NEW token rather than a box where every
     # privileged endpoint is permanently unreachable. ensure() never
