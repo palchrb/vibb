@@ -87,7 +87,11 @@ Phase 2, once offline: target < 15 min including reboot.
   config key the architect could not confirm from the tree; each has
   a named bench step, and a wrong key fails loudly through the
   self-test rather than silently. Resolve them all in the Phase 1
-  bench note before Phase 2.
+  bench note before Phase 2. **`bench/pipewire_platform_rig.sh`** is
+  the pre-code rig for exactly these tags: it writes the §A units (with
+  AM-1/AM-2) and the §B fragments on a bench Pi and runs S1–S5 as
+  PASS/KILL — no vibb code needed, Pi 5 is enough for everything but
+  the RF/RSS numbers.
 
 Standing rules that apply to this plan as to everything else: bench
 first, never the box (`vibb-diagnose-before-fixing`); the go-librespot
