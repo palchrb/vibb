@@ -202,6 +202,18 @@ def status(timeout=5):
     return dict(val)
 
 
+def status_strict(timeout=2):
+    """/status that RAISES when unreachable. status() folds every OSError
+    into {} — right for a screen poll, wrong for a decision that must
+    tell 'not running' (refused) from 'wedged' (timing out under a
+    playing session). Refreshes the cache on success."""
+    with urllib.request.urlopen(API + "/status", timeout=timeout) as r:
+        val = json.loads(r.read()) or {}
+    _status_cache["at"] = time.monotonic()
+    _status_cache["val"] = val
+    return dict(val)
+
+
 def playing(st=None):
     st = status() if st is None else st
     return bool(st.get("track")) and not st.get("paused") and not st.get("stopped")

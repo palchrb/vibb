@@ -49,7 +49,7 @@ for _p in (_HERE, "/usr/local/lib/vibb-py"):
         break
 from vibb import content, mpv as _mpv, radio, spotify  # noqa: E402
 from vibb.output import audio_ready, local_volume  # noqa: E402
-from vibb.paths import STATE_DIR, read_settings  # noqa: E402
+from vibb.paths import STATE_DIR, note_go_restart, read_settings  # noqa: E402
 
 is_spotify = spotify.is_spotify
 POLL_S = 3
@@ -336,6 +336,65 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
         log(f"now playing: {track['name']} — {artists}")
 
 
+PAUSE_CONFIRM_S = float(os.environ.get("VIBB_PAUSE_CONFIRM_S", "2.5"))
+
+
+def _spotify_down(e):
+    """A refused connection is the one honest 'not running'. Everything
+    else — a read timeout, a reset mid-reply — is UNKNOWN: the API may be
+    wedged under a session that is still playing."""
+    return isinstance(getattr(e, "reason", e), ConnectionRefusedError)
+
+
+def _confirm_spotify_paused(budget_s=PAUSE_CONFIRM_S):
+    """Pause Spotify and CONFIRM it before mpv starts.
+
+    bluealsa's exclusive pcm used to be the real guarantee against two
+    sources: a pause that never landed simply met 'Device busy'. PipeWire
+    MIXES, so a go-librespot whose API is wedged in a timeout storm (the
+    crash memory's self-heal gap, 2026-08-10) would keep PLAYING under the
+    fresh mpv (NEW-2). So a timeout is 'unknown', never 'not playing':
+    keep asking inside the budget, then apply the deterministic medicine
+    the daemon uses for the same wedge — try-restart, --no-block because
+    the unit's ExecStartPre can wait 60s for DNS and this sits on the
+    tap-to-audio path — and note it for the daemon's restart dedup. Boot
+    warm-up costs nothing here: a fresh API answers 'no track' at once.
+    Returns True when Spotify is known not to be playing."""
+    deadline = time.monotonic() + budget_s
+    timeouts = 0
+    while True:
+        try:
+            spotify.go("/player/pause", timeout=1)  # don't talk over Spotify
+            st = spotify.status_strict(timeout=1)
+        except OSError as e:
+            if _spotify_down(e):
+                return True  # not running = not playing
+            timeouts += 1
+        else:
+            if not st.get("track") or st.get("paused") or st.get("stopped"):
+                return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+    if not timeouts:
+        log(f"spotify pause unconfirmed after {budget_s:.1f}s (API answers, "
+            "still playing) — spawning anyway")
+        return False
+    log(f"spotify pause unconfirmed after {budget_s:.1f}s (API timing out: "
+        "wedged) — restarting go-librespot")
+    try:
+        subprocess.run(["systemctl", "--no-block", "try-restart",
+                        "go-librespot"], timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"go-librespot restart failed ({e!r})")
+    note_go_restart()   # the daemon's blip rebuild must not bounce it again
+    try:                # the restart stops audio either way; one last look
+        st = spotify.status_strict(timeout=1)
+    except OSError:
+        return True
+    return not st.get("track") or bool(st.get("paused"))
+
+
 def _count_fast_skip(fast_skips, dwell_s):
     """Dead-output evidence bookkeeping for the watchdog below. A
     sub-10s track dwell counts toward "mpv is silently chewing the
@@ -443,13 +502,7 @@ def main():
         if fresh:
             log("starting fresh — cleared remembered position")
 
-    try:
-        # short timeout: this blocks the mpv launch, and go-librespot can be
-        # slow to answer while it warms up right after boot — a paused
-        # session is nice-to-have, not worth stalling audio for
-        spotify.go("/player/pause", timeout=1)  # don't talk over Spotify
-    except OSError:
-        pass
+    _confirm_spotify_paused()  # never two sources: see the function
 
     # Queue planning. An explicit --episode (picked in a menu) wins over the
     # bookmark; otherwise resume: rotate the queue to the remembered episode.
