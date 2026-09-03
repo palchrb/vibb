@@ -44,10 +44,16 @@
 #                            PipeWire names roles after the PEER, so
 #                            a2dp_sink is the default here. S4 says
 #                            which one produces bluez_output.* nodes.
-#   WP_DISABLE_HOOKS=0       1 = also write the hook disables from
-#                            AM-6. If WirePlumber then fails to start,
-#                            the names are wrong or the hooks are
-#                            required — a finding either way.
+#   WP_PROFILE=main-systemwide  WirePlumber 0.5.8 SHIPS a system-wide
+#                            profile (no logind/seat/reserve-device/
+#                            portal, all state-restore hooks off). The
+#                            plan §B guessed its own names; this is the
+#                            real thing. Fragments extend THIS profile.
+#   WP_DISABLE_HOOKS=0       1 = also disable hooks.linking.target.
+#                            find-default + find-best (AM-6, real names).
+#                            If WirePlumber then refuses to start, the
+#                            hooks are hard-required by policy.standard
+#                            — a finding: a custom profile is needed.
 #   BT_MAC=AA:BB:..          a paired+connected BT speaker for S4.
 #   GO_API=http://127.0.0.1:3678   for s6.
 #   SOLOIST=/path/to/soloist       for s7.
@@ -61,6 +67,7 @@ SOCK="$RUN/pipewire-0"
 STATE=/var/lib/vibb
 WP_ROLES="${WP_ROLES:-a2dp_sink}"
 WP_DISABLE_HOOKS="${WP_DISABLE_HOOKS:-0}"
+WP_PROFILE="${WP_PROFILE:-main-systemwide}"
 BT_MAC="${BT_MAC:-}"
 export PIPEWIRE_RUNTIME_DIR="$RUN"
 
@@ -145,15 +152,12 @@ cmd_check() {
   say "WirePlumber's real component/feature names (S1b — compare with plan §B)"
   local conf=/usr/share/wireplumber/wireplumber.conf
   if [ -r "$conf" ]; then
-    note "features the distro profile 'main' knows:"
-    grep -oE '^\s+[a-z][a-z0-9.-]+\s*=\s*(required|optional|disabled)' "$conf" | sed 's/^/         /' | head -40
-    note "linking hooks the distro provides:"
-    grep -oE 'provides = hooks\.linking[a-z.-]*' "$conf" | sort -u | sed 's/^/         /'
-    note "the plan's fragment names (verify against the two lists above):"
-    note "  policy.linking.standard policy.device.profile policy.default-nodes"
-    note "  node.stream.restore device.restore monitor.alsa.reserve-device"
-    note "  monitor.bluez.seat-monitoring hooks.linking.find-default-target"
-    note "  hooks.linking.find-best-target"
+    note "the distro's profiles (we extend '$WP_PROFILE'):"
+    sed -n '/^wireplumber.profiles/,/^}/p' "$conf" | sed 's/^/         /'
+    note "every feature the distro provides (the ONLY names a profile may toggle):"
+    grep -oE 'provides = [a-z][a-z0-9.-]*' "$conf" | sed 's/provides = //' | sort -u | tr '\n' ' ' | fold -s -w 70 | sed 's/^/         /'
+    echo
+    grep -q "$WP_PROFILE" "$conf" && ok "profile '$WP_PROFILE' exists" || bad "profile '$WP_PROFILE' NOT in $conf — set WP_PROFILE"
   else note "$conf not found"; fi
 }
 
@@ -200,7 +204,7 @@ User=$PW_USER
 Group=audio
 SupplementaryGroups=bluetooth
 Environment=PIPEWIRE_RUNTIME_DIR=$RUN
-Environment=PIPEWIRE_CONFIG_DIR=/etc/pipewire
+# NO PIPEWIRE_CONFIG_DIR: it REPLACES the search path and hides /usr/share/pipewire/pipewire.conf (bench finding 2026-09-03)
 Environment=HOME=$STATE/pipewire
 ExecStart=/usr/bin/pipewire
 Nice=0
@@ -225,7 +229,7 @@ Environment=PIPEWIRE_RUNTIME_DIR=$RUN
 Environment=XDG_STATE_HOME=$STATE/wireplumber
 Environment=XDG_CONFIG_HOME=/etc/vibb/wp-empty-config
 Environment=HOME=$STATE/wireplumber
-ExecStart=/usr/bin/wireplumber
+ExecStart=/usr/bin/wireplumber -p $WP_PROFILE
 Nice=0
 Restart=on-failure
 RestartSec=2
@@ -235,7 +239,7 @@ EOF
   ok "wrote pipewire.socket pipewire.service wireplumber.service"
   fi
 
-  say "config fragments (plan §B, AM-17 hw-volume=true, roles=$WP_ROLES)"
+  say "config fragments (plan §B on profile '$WP_PROFILE', AM-17 hw-volume=true, roles=$WP_ROLES, hooks-disable=$WP_DISABLE_HOOKS)"
   mkdir -p /etc/pipewire/pipewire.conf.d /etc/pipewire/client.conf.d /etc/wireplumber/wireplumber.conf.d
   cat > /etc/pipewire/pipewire.conf.d/10-vibb.conf <<'EOF'
 context.properties = {
@@ -263,19 +267,18 @@ stream.properties = {
 }
 EOF
   cat > /etc/wireplumber/wireplumber.conf.d/50-vibb.conf <<EOF
+# Extends the distro's '$WP_PROFILE' profile (0.5.8 ships it: no logind,
+# no seat monitoring, no reserve-device, no portal, every *.state restore
+# hook off). Only names from check's "provides" inventory are used here.
 wireplumber.profiles = {
-  main = {
-    monitor.alsa.reserve-device    = disabled
-    monitor.bluez.seat-monitoring  = disabled
+  $WP_PROFILE = {
+    hardware.video-capture         = disabled
     monitor.alsa-midi              = disabled
     monitor.bluez-midi             = disabled
-    monitor.libcamera              = disabled
-    monitor.v4l2                   = disabled
-    hardware.video-capture         = disabled
-    policy.default-nodes           = disabled
-    node.stream.restore            = disabled
-    device.restore                 = disabled
-    policy.linking.role-based      = disabled
+    hooks.default-nodes.state      = disabled
+    hooks.stream.state             = disabled
+    hooks.device.profile.state     = disabled
+    hooks.device.routes.state      = disabled
   }
 }
 wireplumber.settings = {
@@ -310,15 +313,14 @@ monitor.alsa.rules = [
 EOF
   rm -f /etc/wireplumber/wireplumber.conf.d/51-vibb-hooks.conf
   if [ "$WP_DISABLE_HOOKS" = 1 ]; then
-    cat > /etc/wireplumber/wireplumber.conf.d/51-vibb-hooks.conf <<'EOF'
-# AM-6: names are a GUESS (verify against `check`'s list). If WirePlumber
-# refuses to start with this file, that is the finding: either the names
-# differ or the hooks are hard-required by policy.linking.standard, and
-# the design must go to a custom profile (wireplumber -p vibb) instead.
+    cat > /etc/wireplumber/wireplumber.conf.d/51-vibb-hooks.conf <<EOF
+# AM-6 with the REAL 0.5.8 names. If WirePlumber refuses to start with this
+# file, the hooks are hard-required by policy.standard and the design must
+# define its own profile listing the linking hooks explicitly.
 wireplumber.profiles = {
-  main = {
-    hooks.linking.find-default-target = disabled
-    hooks.linking.find-best-target    = disabled
+  $WP_PROFILE = {
+    hooks.linking.target.find-default = disabled
+    hooks.linking.target.find-best    = disabled
   }
 }
 EOF
@@ -346,13 +348,13 @@ cmd_start() {
     say "starting pipewire + wireplumber as processes (container mode, root, same env as the units)"
     pkill -x wireplumber 2>/dev/null; pkill -x pipewire 2>/dev/null; sleep 1
     mkdir -p "$RUN" && chown "$PW_USER:audio" "$RUN" && chmod 0750 "$RUN"
-    PIPEWIRE_CONFIG_DIR=/etc/pipewire HOME="$STATE/pipewire" \
+    HOME="$STATE/pipewire" \
       setsid pipewire >/tmp/pipewire.log 2>&1 < /dev/null &
     for _ in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 0.5; done
     [ -S "$SOCK" ] && ok "$SOCK up" || { bad "$SOCK never appeared:"; tail -20 /tmp/pipewire.log | sed 's/^/       /'; return 1; }
     chmod 0660 "$SOCK"; chown "$PW_USER:audio" "$SOCK"
     XDG_STATE_HOME="$STATE/wireplumber" XDG_CONFIG_HOME=/etc/vibb/wp-empty-config HOME="$STATE/wireplumber" \
-      setsid wireplumber >/tmp/wireplumber.log 2>&1 < /dev/null &
+      setsid wireplumber -p "$WP_PROFILE" >/tmp/wireplumber.log 2>&1 < /dev/null &
     sleep 3
     pgrep -x wireplumber >/dev/null && ok "wireplumber running (log: /tmp/wireplumber.log)" || { bad "wireplumber died:"; tail -30 /tmp/wireplumber.log | sed 's/^/       /'; }
     grep -iE "error|fail" /tmp/wireplumber.log | head -5 | sed 's/^/       wp: /'
