@@ -616,6 +616,8 @@ cmd_trixie_bootstrap() {
 cmd_trixie_shell() {
   need_root
   [ -x "$CT/usr/bin/wireplumber" ] || { bad "no container at $CT — run trixie-bootstrap"; return 1; }
+  # a container left behind (closed terminal, no `exit`) keeps the tree busy
+  machinectl terminate vibb-trixie 2>/dev/null && { note "terminated a leftover vibb-trixie container"; sleep 2; }
   say "entering $CT (host /dev/snd, /run/udev, system D-Bus bound in; VIBB_RIG_MODE=procs)"
   note "inside:  cd /rig && ./$(basename "$0") check && ./$(basename "$0") install && ./$(basename "$0") start && ./$(basename "$0") test"
   exec systemd-nspawn -D "$CT" --machine=vibb-trixie --resolv-conf=copy-host \
