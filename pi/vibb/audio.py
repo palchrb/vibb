@@ -16,6 +16,9 @@ import json
 import os
 import re
 import subprocess
+import time
+
+from vibb.paths import RUN_DIR
 
 STACK_FILE = os.environ.get("VIBB_AUDIO_STACK_FILE", "/etc/vibb/audio-stack")
 SOCKET = os.environ.get("VIBB_PW_SOCKET", "/run/pipewire/pipewire-0")
@@ -195,6 +198,265 @@ def ensure_bt_route(mac):
         return True
     finally:
         lock.close()
+
+
+# --- the policy self-test (I10, AM-7, AM-8) -------------------------------------
+# The no-fail-over ban is enforced by config in someone else's package now.
+# So at boot (and whenever PipeWire restarts) vibb PROVES the behaviour:
+# a targetless stream links nowhere, a stream whose target vanishes is
+# never re-homed, a pinned stream ignores the default sink, the settings
+# say so, and the HAT's graph gain is 1.0. A safety failure flips
+# cap_everywhere() — every landing on every output is capped (AM-7) —
+# and shows on /status and the screen; nothing is refused (bedtime rule).
+
+POLICY_FILE = os.environ.get("VIBB_AUDIO_POLICY_FILE",
+                             os.path.join(RUN_DIR, "vibb-audio-policy"))
+SELFTEST_POLL_S = 60.0       # cookie watch cadence (one pw-dump a minute)
+SELFTEST_MIN_GAP_S = 300.0   # vibb-daemon is Restart=always/5s: never probe-loop
+_policy_cache = {"mtime": None, "val": {}}
+_PROBE_ENV = {"PIPEWIRE_RUNTIME_DIR": os.path.dirname(SOCKET)}
+_PWCAT = ["pw-cat", "--playback", "--raw", "--format=s16", "--rate=44100",
+          "--channels=2", "/dev/zero"]   # silence, never EOF; killed by us
+
+
+def _run(cmd, timeout=5.0):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, **_PROBE_ENV))
+        return r.returncode, r.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+
+
+def _popen(cmd, props):
+    env = dict(os.environ, **_PROBE_ENV)
+    env["PIPEWIRE_PROPS"] = props
+    try:
+        return subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def _kill(p):
+    if p is not None:
+        try:
+            p.kill()
+            p.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def core_cookie(dump):
+    for obj in dump:
+        if obj.get("type") == "PipeWire:Interface:Core":
+            return (obj.get("info") or {}).get("cookie")
+    return None
+
+
+def _node_named(dump, name):
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        if ((obj.get("info") or {}).get("props") or {}).get("node.name") == name:
+            return obj
+    return None
+
+
+def _linked_sinks(dump, node_id):
+    """Names of the nodes a node's output links reach."""
+    names = {obj["id"]: ((obj.get("info") or {}).get("props") or {}).get("node.name")
+             for obj in dump if obj.get("type") == "PipeWire:Interface:Node"}
+    out = set()
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Link":
+            continue
+        info = obj.get("info") or {}
+        if info.get("output-node-id") == node_id:
+            out.add(names.get(info.get("input-node-id")) or "?")
+    return out
+
+
+def _settings():
+    """{key: value} out of `wpctl settings` (0.5.8: '- Name: k' / 'Value: v')."""
+    _rc, text = _run(["wpctl", "settings"], timeout=5)
+    out, key = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("- Name:"):
+            key = line.split(":", 1)[1].strip()
+        elif line.startswith("Value:") and key:
+            out[key] = line.split(":", 1)[1].strip().lower()
+            key = None
+    return out
+
+
+def _probe_stream(name, target=None):
+    """A silent pw-cat stream named `name`, pinned to `target` or targetless."""
+    props = f'{{ node.name = "{name}" application.name = "vibb-selftest" }}'
+    cmd = list(_PWCAT)
+    if target:
+        cmd = cmd[:1] + ["--target", target] + cmd[1:]
+    return _popen(cmd, props)
+
+
+def _mk_sink(name):
+    _run(["pw-cli", "create-node", "adapter",
+          f"{{ factory.name=support.null-audio-sink node.name={name} "
+          "media.class=Audio/Sink object.linger=true audio.position=[FL FR] "
+          "monitor.channel-volumes=false }"], timeout=5)
+
+
+def _rm_sink(dump, name):
+    n = _node_named(dump, name)
+    if n is not None:
+        _run(["pw-cli", "destroy", str(n["id"])], timeout=5)
+
+
+def policy_selftest():
+    """Run the probes; write + return the verdict. pw_dump() is called in a
+    FIXED order (the unit test scripts it): 1 the graph, 2 targetless
+    probe live, 3 the null sink created, 4 the pinned probe live, 5 the
+    sink destroyed, 6 the default probe live, 7 final graph."""
+    safety, rf = [], []
+    d = pw_dump()                                                    # 1
+    if not d:
+        return _write_verdict({"verdict": "down", "safety": [], "rf": [],
+                               "cookie": None})
+    cookie = core_cookie(d)
+    real_sinks = ("bluez_output.", "alsa_output.", "vibb_null")
+
+    # (1) a TARGETLESS stream must link nowhere (find-default/find-best off)
+    p = _probe_stream("vibb-selftest-targetless")
+    time.sleep(1.0)
+    d = pw_dump()                                                    # 2
+    n = _node_named(d, "vibb-selftest-targetless")
+    if n is None or _linked_sinks(d, n["id"]):
+        safety.append("targetless-linked" if n is not None else "probe-missing")
+    _kill(p)
+
+    # (2) a stream whose target VANISHES is destroyed, never re-homed
+    _mk_sink("vibb_selftest_sink")
+    time.sleep(0.5)
+    d = pw_dump()                                                    # 3
+    p = _probe_stream("vibb-selftest-pinned", "vibb_selftest_sink")
+    time.sleep(1.0)
+    d = pw_dump()                                                    # 4
+    n = _node_named(d, "vibb-selftest-pinned")
+    if n is None or _linked_sinks(d, n["id"]) != {"vibb_selftest_sink"}:
+        safety.append("pinned-not-linked")
+    _rm_sink(d, "vibb_selftest_sink")
+    time.sleep(1.5)
+    d = pw_dump()                                                    # 5
+    n = _node_named(d, "vibb-selftest-pinned")
+    if n is not None and any(s.startswith(real_sinks) or s == "?"
+                             for s in _linked_sinks(d, n["id"])):
+        safety.append("rescued-after-vanish")
+    _kill(p)
+
+    # (3) a pinned stream ignores the (configured) default sink
+    _mk_sink("vibb_selftest_sink"); _mk_sink("vibb_selftest_B")
+    _run(["pw-metadata", "0", "default.configured.audio.sink",
+          '{ "name": "vibb_selftest_B" }'], timeout=5)
+    p = _probe_stream("vibb-selftest-default", "vibb_selftest_sink")
+    time.sleep(1.0)
+    d = pw_dump()                                                    # 6
+    n = _node_named(d, "vibb-selftest-default")
+    if n is None or _linked_sinks(d, n["id"]) != {"vibb_selftest_sink"}:
+        safety.append("followed-default")
+    _kill(p)
+    _run(["pw-metadata", "0", "default.configured.audio.sink", "-d"], timeout=5)
+    _rm_sink(d, "vibb_selftest_sink"); _rm_sink(d, "vibb_selftest_B")
+
+    # (4) the settings belt
+    s = _settings()
+    for k in ("linking.allow-moving-streams", "linking.follow-default-target",
+              "node.stream.restore-target", "node.stream.restore-props"):
+        if s.get(k) != "false":
+            safety.append(f"setting:{k}={s.get(k)}")
+
+    # (5) HAT gain 1.0 / unmuted; (RF) codec, suspend, no input nodes
+    d = pw_dump()                                                    # 7
+    local = find_local_sink(d)
+    for obj in d:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        info = obj.get("info") or {}
+        props = info.get("props") or {}
+        name = props.get("node.name", "")
+        if name == local:
+            for pr in (info.get("params") or {}).get("Props") or []:
+                vols = pr.get("channelVolumes") or []
+                if pr.get("mute") or any(abs(v - 1.0) > 0.01 for v in vols):
+                    safety.append("hat-gain")
+                    break
+        if name.startswith("bluez_output."):
+            if props.get("api.bluez5.codec", "sbc") != "sbc":
+                rf.append(f"codec:{props.get('api.bluez5.codec')}")
+            if str(props.get("session.suspend-timeout-seconds", "")) != "120":
+                rf.append("bt-suspend")
+        if name.startswith("bluez_input."):
+            rf.append("bluez-input-node")
+
+    verdict = "fail-safety" if safety else ("fail-rf" if rf else "ok")
+    return _write_verdict({"verdict": verdict, "safety": safety, "rf": rf,
+                           "cookie": cookie})
+
+
+def _write_verdict(v):
+    v["at"] = time.time()
+    try:
+        os.makedirs(os.path.dirname(POLICY_FILE), exist_ok=True)
+        tmp = f"{POLICY_FILE}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(v, f)
+        os.replace(tmp, POLICY_FILE)
+    except OSError as e:
+        log(f"audio policy: could not record the verdict ({e!r})")
+    _policy_cache["mtime"] = None
+    if v["verdict"] != "ok":
+        log(f"AUDIO POLICY {v['verdict'].upper()}: safety={v['safety']} rf={v['rf']}")
+    else:
+        log("audio policy self-test: ok")
+    return v
+
+
+def selftest_state():
+    """The last verdict, {} when none. mtime-cached: the 1/s readers and
+    every cap site call this and must never parse a file per call."""
+    try:
+        mt = os.stat(POLICY_FILE).st_mtime
+    except OSError:
+        return {}
+    if _policy_cache["mtime"] != mt:
+        try:
+            with open(POLICY_FILE) as f:
+                _policy_cache["val"] = json.load(f)
+        except (OSError, ValueError):
+            _policy_cache["val"] = {}
+        _policy_cache["mtime"] = mt
+    return _policy_cache["val"]
+
+
+def cap_everywhere():
+    """AM-7: a safety-class drift means a stream might reach the HAT
+    without vibb choosing it — so until the next green run every landing
+    on EVERY output is capped. False without a verdict, and always under
+    bluealsa (no policy engine to drift)."""
+    return stack() == "pipewire" and selftest_state().get("verdict") == "fail-safety"
+
+
+def selftest_due(dump):
+    """Never run: yes. PipeWire restarted (core cookie changed): yes.
+    Otherwise not inside SELFTEST_MIN_GAP_S of the last run."""
+    st = selftest_state()
+    if not st:
+        return True
+    cookie = core_cookie(dump)
+    if cookie is not None and st.get("cookie") != cookie:
+        return True
+    return time.time() - float(st.get("at") or 0) > SELFTEST_MIN_GAP_S and \
+        st.get("verdict") == "down"
 
 
 def asound_text(mac, bt_node, local_node):
