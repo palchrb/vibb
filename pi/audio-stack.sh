@@ -260,12 +260,31 @@ audio_stack_apply() {
     _as_write_units
     _as_write_fragments
     systemctl daemon-reload
-    # bluealsa and PipeWire both register A2DP endpoints with BlueZ and
-    # BlueZ accepts both — undefined ownership. Mask, never remove (NEW-6).
+    # ORDER MATTERS: bring PipeWire up and PROVE it before masking
+    # bluealsa. The other way round, a failed start (a missing package, a
+    # bad unit) left the box with no A2DP endpoint at all and set -e
+    # aborted the install right there — a silent box needing ssh. This
+    # way a failure aborts with bluealsa still serving audio.
+    systemctl enable --now pipewire.socket pipewire.service wireplumber.service
+    local _try _ok=0
+    for _try in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -S $_AS_ROOT$_AS_SOCK ]] && systemctl is-active --quiet wireplumber.service; then
+        _ok=1; break
+      fi
+      sleep 1
+    done
+    if [[ $_ok -ne 1 ]]; then
+      systemctl disable --now pipewire.socket pipewire.service wireplumber.service >/dev/null 2>&1 || true
+      _as_say "PipeWire did NOT come up ($_AS_SOCK / wireplumber) — bluealsa left"
+      _as_say "untouched and still serving audio. Check: journalctl -u pipewire -u wireplumber"
+      return 1
+    fi
+    # Only now: bluealsa and PipeWire both register A2DP endpoints with
+    # BlueZ and BlueZ accepts both — undefined ownership. Mask, never
+    # remove (NEW-6), so an offline rollback is always possible.
     for u in bluealsa.service bluealsad.service; do
       systemctl mask --now "$u" >/dev/null 2>&1 || true
     done
-    systemctl enable --now pipewire.socket pipewire.service wireplumber.service
     _as_say "PipeWire system units up; bluealsa masked (rollback: VIBB_AUDIO_STACK=bluealsa ./install.sh)"
   else
     if [[ -e $_AS_ETC/systemd/system/pipewire.service ]]; then

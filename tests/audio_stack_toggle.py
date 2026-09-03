@@ -21,20 +21,36 @@ directions, against a fake systemctl and a temp filesystem root.
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SH = os.path.join(REPO, "pi", "audio-stack.sh")
 
 
-def run(stack_env, root, extra=""):
+def run(stack_env, root, extra="", fake_pw_starts="1"):
     """Source the toggle with fakes on PATH, apply, dump the systemctl log."""
     bindir = os.path.join(root, "bin")
     os.makedirs(bindir, exist_ok=True)
     log = os.path.join(root, "systemctl.log")
     for tool in ("systemctl", "useradd", "groupadd", "chown"):
         with open(os.path.join(bindir, tool), "w") as f:
-            f.write(f'#!/bin/sh\necho "{tool} $@" >> {log}\nexit 0\n')
+            # `enable --now pipewire...` creates the socket, like the real
+            # thing would; is-active answers per FAKE_UNIT_ACTIVE
+            # `enable --now pipewire...` binds a REAL unix socket where the
+            # service would, so audio-stack's `[[ -S ... ]]` readiness gate
+            # is exercised for real; is-active and the socket both follow
+            # FAKE_PW_STARTS so the failure path is testable too.
+            bind = (f'{sys.executable} -c "import socket,os;'
+                    f"os.makedirs('{root}/run/pipewire',exist_ok=True);"
+                    f"s=socket.socket(socket.AF_UNIX);"
+                    f"s.bind('{root}/run/pipewire/pipewire-0')\"")
+            f.write(f'#!/bin/sh\necho "{tool} $@" >> {log}\n'
+                    f'case "$1 $2" in\n'
+                    f'  "enable --now") case "$*" in *pipewire.socket*)'
+                    f' [ "${{FAKE_PW_STARTS:-1}}" = 1 ] && {bind} ;; esac ;;\n'
+                    f'  "is-active --quiet") [ "${{FAKE_PW_STARTS:-1}}" = 1 ] || exit 3 ;;\n'
+                    f'esac\nexit 0\n')
         os.chmod(os.path.join(bindir, tool), 0o755)
     with open(os.path.join(bindir, "getent"), "w") as f:
         f.write('#!/bin/sh\nexit 0\n')   # groups exist
@@ -54,13 +70,13 @@ echo "ENV:"; audio_stack_unit_env
 echo "AFTER: $(audio_stack_endpoint_units)"
 """
     env = dict(os.environ, PATH=bindir + ":" + os.environ["PATH"],
-               VIBB_FS_ROOT=root)
+               VIBB_FS_ROOT=root, FAKE_PW_STARTS=fake_pw_starts)
     if stack_env is None:
         env.pop("VIBB_AUDIO_STACK", None)
     else:
         env["VIBB_AUDIO_STACK"] = stack_env
     r = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                       text=True, timeout=60)
+                       text=True, timeout=90)
     calls = open(log).read().splitlines() if os.path.exists(log) else []
     return r, calls
 
@@ -125,7 +141,24 @@ enables = [c for c in calls if c.startswith("systemctl enable")]
 assert enables == ["systemctl enable --now pipewire.socket pipewire.service wireplumber.service"], enables
 assert "systemctl daemon-reload" in calls
 assert calls.index("systemctl daemon-reload") < calls.index(enables[0])
+# PipeWire is proven up BEFORE bluealsa is masked: a failed start must
+# never leave the box with no A2DP endpoint at all
+assert calls.index(enables[0]) < calls.index(masks[0]), \
+    "enable+verify pipewire, THEN mask bluealsa"
 print("2. pipewire: bench-shaped units + fragments, bluealsa masked, enable order OK")
+
+# 2b. PipeWire fails to come up: the install ABORTS with bluealsa still
+#     serving audio, and the half-started units are disabled again. The
+#     other order (mask first) left the box with no A2DP endpoint at all.
+root_fail = tempfile.mkdtemp()
+r, calls = run("pipewire", root_fail, extra="", fake_pw_starts="0")
+assert r.returncode != 0, "a PipeWire that never starts must fail the install"
+assert "did NOT come up" in r.stdout, r.stdout
+assert not any(c.startswith("systemctl mask --now bluealsa") for c in calls), \
+    "bluealsa must NOT be masked when PipeWire did not come up"
+assert any(c.startswith("systemctl disable --now pipewire.socket") for c in calls), \
+    "the half-started units are disabled again"
+print("2b. failed PipeWire start: aborts, bluealsa untouched OK")
 
 # 3. rollback
 os.makedirs(os.path.join(root, "etc/alsa/conf.d"), exist_ok=True)
