@@ -9,9 +9,12 @@ child has pulled dead headphones off: until now the loudest event this
 box could produce was the one action it offers in that moment.
 
 Pins: the cap applies on the local pcm only, at USE and never written
-back (volume.json must keep meaning "what the user chose"), on both
-paths that can put audio on the speaker — a fresh mpv, and the live
-retarget of a playing one — and 0 disables it."""
+back (volume.json must keep meaning "what the user chose"), on every
+path that can put audio on the speaker — a fresh mpv, the live retarget
+of a playing one, and (since 2026-09-02, NEW-1) a Spotify session's
+_apply_box_volume, which used to reach the HAT uncapped — and 0
+disables it. tests/spotify_volume_before_play.py pins the Spotify
+ordering (cap before /player/play)."""
 import json
 import os
 import sys
@@ -65,6 +68,16 @@ assert "json.dump({\"volume\"" not in src[i_cap:i_spawn], \
 with open(os.path.join(TMP, "volume.json")) as f:
     assert json.load(f)["volume"] == 90
 print("3. fresh mpv capped at use; the saved knob is untouched OK")
+
+# 3b. the Spotify engine gets the same cap, in the one function every
+#     Spotify landing (spawn, blip resume, rebuild) goes through
+i_abv = src.index("def _apply_box_volume():")
+abv = src[i_abv:src.index("\ndef ", i_abv + 1)]
+assert "local_volume(" in abv and "local_fallback_cap" in abv, \
+    "Spotify must be capped for the HAT like mpv is (NEW-1)"
+assert abv.index("local_volume(") < abv.index("/player/volume"), \
+    "cap the value BEFORE it is POSTed"
+print("3b. Spotify's box-volume apply is capped for the speaker OK")
 
 # 4. the LIVE retarget — the loudest path, since it moves a playing
 #    child onto the amplifier while mpv keeps the headphone softvol

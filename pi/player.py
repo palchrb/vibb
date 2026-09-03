@@ -162,12 +162,21 @@ SPOT_RESUME_MIN_MS = 20000
 def _apply_box_volume():
     """One volume knob across sources: mpv reads volume.json at every
     start — give go-librespot the same treatment, else it keeps whatever
-    its previous session used and Spotify plays louder/softer than NRK."""
+    its previous session used and Spotify plays louder/softer than NRK.
+
+    Capped for the HAT exactly like a fresh mpv is (local_volume): the
+    headphone level a parent set is a room-filling level on the amplifier,
+    and until 2026-09-02 Spotify was the one source that reached the HAT
+    UNCAPPED (NEW-1) — every such landing had a person pressing something,
+    which is the only reason it never bit. Applied at use, never written
+    back, so volume.json keeps meaning "what the user chose"."""
     try:
         with open(os.path.join(STATE_DIR, "volume.json")) as f:
             v = max(0, min(100, round(json.load(f)["volume"])))
     except (OSError, ValueError, KeyError, TypeError):
         return  # never set through the box yet — leave as is
+    v = local_volume(v, output_pcm(),
+                     read_settings().get("local_fallback_cap", 35))
     try:
         steps = spotify.status().get("volume_steps") or 65535
         spotify.go("/player/volume", body={"volume": round(v * steps / 100)})
@@ -247,6 +256,11 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
     else:
         log("go-librespot session never came up — check: journalctl -u go-librespot")
         sys.exit(1)
+
+    # The cap has to land BEFORE audio starts: applied only after
+    # /player/play (below, kept as belt) it left the first 0.5-2s of every
+    # Spotify landing on the HAT at headphone level (QA 2026-09-02, AM-13).
+    _apply_box_volume()
 
     body = {"uri": uri}
     if start_uri:
