@@ -194,6 +194,7 @@ findings; the full pass is Appendix C. Its decisions, applied:
 | AM-32 | install.sh is written from the RIG's units/fragments (§A/§B's 20-name profile block is dead text). |
 | AM-33 | The transport gate follows the stack in CODE (`audio.stack()`), not only the unit env — play.sh/ssh `bt.py` runs carry no env. Shadow cadence 1 s on bt-reconnect, 10 s on the daemon. |
 | AM-34 | The post-reopen cap re-apply (set_output onto local, `_go_output_rebuild` on local) is Phase 0 too. |
+| AM-35 | **S4's two open config questions are settled from the PipeWire 1.4.2 source, not the bench.** (a) `bluez5.roles` names the REMOTE device's role: `bluez5-device.c` `emit_nodes()` answers `SPA_BT_PROFILE_A2DP_SINK` with `emit_node(..., DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, false)` — a PLAYBACK node, i.e. `bluez_output.*` — and `bluez5-dbus.c`'s `media_endpoint_to_profile()` maps our locally registered `A2DP_SOURCE_ENDPOINT` (UUID `0000110a`) to that same profile, which is the exact UUID btbus's transport gate matches. So `roles = [ a2dp_sink ]` is right (the rig's default all along; §B's `a2dp_source` was the guess), and listing only it means the `0000110b` sink endpoint is never registered — a phone cannot stream INTO the box by construction (MODERATE-3), which is what the rig's `s4_no_sink_role` checks. (b) **`bluez5.enable-hw-volume` must not be set at all** — it is a quirk-list OVERRIDE ("enable hardware volume for devices for which it is disabled"), so `true` would force absolute volume onto headsets blacklisted for mishandling it and `false` would merely decline to override. Neither the architect's `false` nor AM-17's `true` was right. 1.4.2's `DEFAULT_HW_VOLUME_PROFILES` already contains `SPA_BT_PROFILE_A2DP_SINK`, so the kid's headset keeps its own volume buttons by default, quirky devices stay protected, and I8 still holds (vibb never writes a node volume). `WP_HW_VOLUME` is gone; `WP_ROLES` stays as a knob. |
 
 **Commits on `pipewire` (after `96673e1`), each with the suite green and
 the production box (stack unset = bluealsa) behaviourally unchanged:**
@@ -229,8 +230,9 @@ I10 `audio_policy_selftest` + `audio_policy_daemon`, I11
 `bt_transport_gate` (fake_bluezd over a private bus) runs on the rig.
 
 **Owed before the spare-Zero field test (Phase 2 entry):**
-- bench S4 with the headset (roles naming → `WP_ROLES`, hw-volume
-  buttons → `WP_HW_VOLUME`, codec/suspend/no-110b); S3c on the flash
+- bench S4 with the headset — now a CONFIRMATION, not a decision
+  (AM-35 settled roles and hw-volume from the source): codec sbc,
+  suspend 120, no `0000110b` transport, headset buttons audible; S3c on the flash
   itself (AM-1/AM-2 are systemd facts); the HAT node's real name
   (informational — the resolver reads it); s6 go-librespot live reopen
   through pipewire-alsa; `/player/volume` with no track loaded.

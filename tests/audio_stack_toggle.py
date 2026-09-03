@@ -103,7 +103,6 @@ for key in ("hooks.linking.target.find-default = disabled",
             "bluez5.codecs             = [ sbc ]",
             "bluez5.enable-sbc-xq      = false",
             "bluez5.enable-msbc        = false",
-            "bluez5.enable-hw-volume   = true",
             "bluez5.roles              = [ a2dp_sink ]",
             "bluez5.dummy-avrcp-player = false",
             "session.suspend-timeout-seconds = 120",
@@ -112,6 +111,8 @@ for key in ("hooks.linking.target.find-default = disabled",
     assert key in frag, f"missing in 50-vibb.conf: {key}"
 assert "policy.linking.standard" not in frag and "policy.default-nodes" not in frag, \
     "only names from the distro's provides inventory"
+assert not re.search(r"^\s*bluez5\.(enable-)?hw-volume\s*=", frag, re.M), \
+    "AM-35: hw-volume is a quirk-list override, never set by vibb"
 client = open(os.path.join(root, "etc/pipewire/client.conf.d/10-vibb.conf")).read()
 assert "node.dont-reconnect = true" in client and "node.dont-fallback  = true" in client
 core = open(os.path.join(root, "etc/pipewire/pipewire.conf.d/10-vibb.conf")).read()

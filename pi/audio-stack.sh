@@ -18,8 +18,10 @@
 # (bench/pipewire_platform_rig.sh, 2026-09-03): no RuntimeDirectory on the
 # socket-activated service (AM-1), wireplumber BindsTo/WantedBy pipewire
 # (AM-2), Nice=0 (AM-4), no PIPEWIRE_CONFIG_DIR (AM-21), the shipped
-# main-embedded profile (AM-22), find-default/find-best disabled (AM-23),
-# hw-volume on (AM-17). VIBB_FS_ROOT prefixes every path (tests).
+# main-embedded profile (AM-22), find-default/find-best disabled (AM-23).
+# hw-volume is DEFAULTED, not set — see the comment at the fragment
+# (AM-35, settled from the 1.4.2 source, not the bench).
+# VIBB_FS_ROOT prefixes every path (tests).
 
 AUDIO_STACK="${AUDIO_STACK:-}"
 _AS_ROOT="${VIBB_FS_ROOT:-}"
@@ -28,11 +30,17 @@ _AS_STATE="$_AS_ROOT/var/lib/vibb"
 _AS_STACK_FILE="$_AS_ETC/vibb/audio-stack"
 _AS_SOCK=/run/pipewire/pipewire-0
 PW_USER=pipewire
-# bluez5.roles is PEER-centric (bench: a2dp_sink produces bluez_output.*
-# nodes); hw-volume keeps absolute-volume headsets' own buttons working
-# (AM-17). Both stay variables so bench S4 can flip them in one place.
+# bluez5.roles names the REMOTE device's role — settled from the PipeWire
+# 1.4.2 source, not guessed (AM-35): bluez5-device.c emit_nodes() answers
+# SPA_BT_PROFILE_A2DP_SINK with emit_node(DEVICE_ID_SINK, ...), i.e. a
+# PLAYBACK node (bluez_output.*), and bluez5-dbus.c's
+# media_endpoint_to_profile() maps our locally registered
+# A2DP_SOURCE_ENDPOINT (UUID 0000110a) to that same profile — the very
+# UUID btbus's transport gate matches. So a2dp_sink = "the headphone is
+# the sink, we feed it". Listing ONLY it also means the box never
+# registers the 0000110b sink endpoint, so a phone cannot stream INTO
+# the box (MODERATE-3 closed by construction, not by policy).
 WP_ROLES="${WP_ROLES:-a2dp_sink}"
-WP_HW_VOLUME="${WP_HW_VOLUME:-true}"
 WP_PROFILE="${WP_PROFILE:-main-embedded}"
 
 _as_say() { echo "    audio stack: $*"; }
@@ -216,7 +224,15 @@ monitor.bluez.properties = {
   bluez5.codecs             = [ sbc ]
   bluez5.enable-sbc-xq      = false
   bluez5.enable-msbc        = false
-  bluez5.enable-hw-volume   = $WP_HW_VOLUME
+  # bluez5.enable-hw-volume is deliberately ABSENT (AM-35). It is not an
+  # on/off switch: the docs call it "override device quirk list and enable
+  # hardware volume for devices for which it is disabled", so true would
+  # FORCE absolute volume onto headsets blacklisted for handling it badly,
+  # and false would merely decline to override. The knob that matters is
+  # the per-profile default, and 1.4.2's DEFAULT_HW_VOLUME_PROFILES
+  # already contains SPA_BT_PROFILE_A2DP_SINK — so the kid's headset
+  # keeps its own volume buttons, quirky devices stay protected, and vibb
+  # still never writes a node volume itself (I8).
   bluez5.dummy-avrcp-player = false
   bluez5.default.rate       = 44100
 }

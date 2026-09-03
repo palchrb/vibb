@@ -39,11 +39,11 @@
 #   SKIPPED there; AM-1/AM-2 are systemd facts, verify them on a flash.
 #
 # Knobs (env):
-#   WP_ROLES=a2dp_sink       bluez5.roles value under test. The plan
-#                            wrote a2dp_source (host-centric guess);
-#                            PipeWire names roles after the PEER, so
-#                            a2dp_sink is the default here. S4 says
-#                            which one produces bluez_output.* nodes.
+#   WP_ROLES=a2dp_sink       bluez5.roles value. The plan guessed
+#                            a2dp_source (host-centric); the 1.4.2
+#                            source settles it the other way — see
+#                            AM-35 in pi/audio-stack.sh. S4 now only
+#                            CONFIRMS it on real hardware.
 #   WP_PROFILE=main-embedded WirePlumber 0.5.8 SHIPS it: main +
 #                            mixin.systemwide-session (no logind/seat/
 #                            reserve-device/portal) + mixin.stateless
@@ -246,7 +246,7 @@ EOF
   ok "wrote pipewire.socket pipewire.service wireplumber.service"
   fi
 
-  say "config fragments (plan §B on profile '$WP_PROFILE', AM-17 hw-volume=true, roles=$WP_ROLES, hooks-disable=$WP_DISABLE_HOOKS)"
+  say "config fragments (plan §B on profile '$WP_PROFILE', hw-volume defaulted, roles=$WP_ROLES, hooks-disable=$WP_DISABLE_HOOKS)"
   mkdir -p /etc/pipewire/pipewire.conf.d /etc/pipewire/client.conf.d /etc/wireplumber/wireplumber.conf.d
   cat > /etc/pipewire/pipewire.conf.d/10-vibb.conf <<'EOF'
 context.properties = {
@@ -306,7 +306,8 @@ monitor.bluez.properties = {
   bluez5.codecs             = [ sbc ]
   bluez5.enable-sbc-xq      = false
   bluez5.enable-msbc        = false
-  bluez5.enable-hw-volume   = true
+  # enable-hw-volume deliberately absent: it is a quirk-list override, and
+  # 1.4.2's DEFAULT_HW_VOLUME_PROFILES already covers A2DP_SINK (AM-35)
   bluez5.dummy-avrcp-player = false
   bluez5.default.rate       = 44100
 }
