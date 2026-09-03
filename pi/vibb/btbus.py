@@ -17,6 +17,7 @@ implementation until phase B lands. Importing this module must never
 require dbus — all dbus imports are lazy.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -367,21 +368,128 @@ def _map_pair_error(name, msg):
     return PAIR_ERROR, f"{name}: {msg}"
 
 
-# --- primitives: bluealsa --------------------------------------------------------
+# --- primitives: the A2DP transport gate ------------------------------------------
+# The box's universal "audio can really happen" oracle (audio_ready, the
+# btwatchd commit gate, /status's icon, set_output's deferred switch...).
+# Two implementations behind ONE signature, selected by VIBB_BT_GATE:
+#   pcm        bluealsa's org.bluealsa.PCM1 — the proven path, bluealsa-only
+#   transport  BlueZ's own org.bluez.MediaTransport1 for the device carrying
+#              the HOST's A2DP Source UUID = the peer accepted our
+#              SetConfiguration. Backend-neutral: BlueZ creates it whoever
+#              owns the endpoint (bluealsa today, PipeWire tomorrow). A
+#              0000110b transport (a phone streaming INTO the box) never counts.
+#   shadow     answer with pcm, compare against transport at most every 10s
+#              and log each disagreement with direction + duration. Flip
+#              criteria (PLAN-pipewire-soloist.md AM-12): a week with no
+#              disagreement lasting two compares, none in the
+#              transport=False/pcm=True direction.
+# The bluealsa PCM appears when bluealsa has negotiated a codec; the
+# transport when BlueZ has configured the endpoint — hundreds of ms apart
+# on a connect, which is exactly what shadow mode measures before the flip.
+GATE_MODE = os.environ.get("VIBB_BT_GATE", "shadow")
+A2DP_SOURCE_UUID = "0000110a-0000-1000-8000-00805f9b34fb"
+SHADOW_S = 10.0
+_shadow = {"at": 0.0, "since": None, "dir": None}
+
 
 def a2dp_pcm_present(mac):
-    """The real 'audio ready' signal: bluealsa exposes an A2DP PCM."""
+    """The real 'audio ready' signal: the A2DP transport to `mac` exists."""
+    if GATE_MODE == "transport":
+        return a2dp_transport_present(mac)
     if backend() == "dbus":
         try:
-            return _dbus_a2dp_pcm_present(mac)
+            present = _dbus_a2dp_pcm_present(mac)
         except Exception as e:
             log(f"bt dbus pcm check failed ({e.__class__.__name__}) — cli")
+        else:
+            if GATE_MODE == "shadow":
+                _shadow_compare(mac, present)
+            return present
     return _cli_a2dp_pcm_present(mac)
+
+
+def a2dp_transport_present(mac):
+    """MediaTransport1 (A2DP source side) for `mac` — any state counts:
+    idle/pending/active all mean the peer accepted the configuration."""
+    if backend() == "dbus":
+        try:
+            return _dbus_a2dp_transport_present(mac)
+        except Exception as e:
+            log(f"bt dbus transport check failed ({e.__class__.__name__}) — cli")
+    return _cli_a2dp_transport_present(mac)
+
+
+def _shadow_compare(mac, pcm):
+    now = time.monotonic()
+    if now - _shadow["at"] < SHADOW_S:
+        return  # the 1/s readers must not double the bus traffic
+    _shadow["at"] = now
+    try:
+        tr = _dbus_a2dp_transport_present(mac)
+    except Exception as e:
+        log(f"bt gate shadow: transport read failed ({e.__class__.__name__})")
+        return
+    if tr == pcm:
+        if _shadow["since"] is not None:
+            log(f"bt gate: agree again after {now - _shadow['since']:.0f}s "
+                f"({_shadow['dir']})")
+            _shadow["since"], _shadow["dir"] = None, None
+        return
+    d = f"transport={tr} pcm={pcm}"
+    if _shadow["since"] is None:
+        _shadow["since"], _shadow["dir"] = now, d
+        log(f"bt gate: DISAGREE {d} (started)")
+    elif _shadow["dir"] != d:
+        _shadow["dir"] = d
+        log(f"bt gate: DISAGREE flipped to {d}")
 
 
 def _cli_a2dp_pcm_present(mac):
     _c, pcm = _run(["bluealsa-aplay", "-L"], timeout=10)
     return mac.lower() in pcm.lower()
+
+
+def _cli_a2dp_transport_present(mac):
+    """busctl (systemd, always present) — the transport objects have no
+    bluetoothctl text surface."""
+    _c, out = _run(["busctl", "--system", "--json=short", "call", "org.bluez",
+                    "/", "org.freedesktop.DBus.ObjectManager",
+                    "GetManagedObjects"], timeout=10)
+    return transport_in_managed(busctl_objects(out), mac)
+
+
+def busctl_objects(text):
+    """The {path: {iface: {prop: value}}} tree out of `busctl --json=short`
+    (every variant arrives as {"type": .., "data": ..}); {} on any parse
+    failure, so a garbled reply reads as 'no transport'."""
+    try:
+        objs = json.loads(text)["data"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return {}
+
+    def plain(v):
+        if isinstance(v, dict) and "data" in v and "type" in v:
+            return plain(v["data"])
+        return v
+    try:
+        return {p: {i: {k: plain(v) for k, v in props.items()}
+                    for i, props in ifaces.items()}
+                for p, ifaces in objs.items()}
+    except AttributeError:
+        return {}
+
+
+def transport_in_managed(objs, mac):
+    """Pure: does an ObjectManager tree hold an A2DP-source transport to
+    `mac`? Shared by the dbus and busctl paths so both read the same rule."""
+    frag = "/dev_" + mac.upper().replace(":", "_") + "/"
+    for path, ifaces in objs.items():
+        tr = ifaces.get("org.bluez.MediaTransport1")
+        if tr is None or frag not in str(path):
+            continue
+        if str(tr.get("UUID", "")).lower() == A2DP_SOURCE_UUID:
+            return True
+    return False
 
 
 # --- dbus backend ----------------------------------------------------------------
@@ -588,6 +696,12 @@ def _dbus_remove_device(mac):
         return REMOVE_OK, "Device has been removed"
     except dbus.exceptions.DBusException as e:
         return _map_remove_error(e.get_dbus_name() or "", str(e))
+
+
+def _dbus_a2dp_transport_present(mac):
+    """org.bluez.MediaTransport1 under /org/bluez/hci0/dev_<MAC>/sepN/fdN
+    with the host's A2DP Source UUID — see the gate comment above."""
+    return transport_in_managed(_managed(_BLUEZ, "/"), mac)
 
 
 def _dbus_a2dp_pcm_present(mac):

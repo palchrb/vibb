@@ -23,10 +23,16 @@ Exports:
                         registered agent per SetPairFlow — the deadlock
                         regression: a blocking Pair never answers and
                         fails via the fake's 15s agent timeout)
+  /org/bluez/hci0/dev_*/sep1/fd0
+                        org.bluez.MediaTransport1 (UUID/State/Device) —
+                        the stack-neutral A2DP gate; SetPcm(mac, true)
+                        ALSO creates the A2DP-source transport so the
+                        parity fixtures keep meaning "audio ready"
   /org/bluealsa         ObjectManager exposing org.bluealsa.PCM1 objects
   /org/vibb/mock      control interface (org.vibb.Mock):
                         AddDevice(mac, name, paired, connected, rssi)
                         SetConnected(mac, bool)  SetPcm(mac, bool)
+                        SetTransport(mac, uuid, state)  DropTransport(mac)
                         DropDevice(mac)  SetConnectResult(mac, s)
                         SetPairResult(mac, "verdict [verdict ...]") —
                           queue, one per Pair() call; ok|already|
@@ -64,6 +70,8 @@ BUS = dbus.bus.BusConnection(_ADDR) if _ADDR else dbus.SystemBus()
 DEVICES = {}   # mac -> {name, paired, connected, rssi}
 DEVICE_OBJS = {}  # mac -> Device (needed to emit PropertiesChanged)
 PCMS = {}      # mac -> bool
+TRANSPORTS = {}  # mac -> {"uuid", "state"} (org.bluez.MediaTransport1)
+A2DP_SOURCE = "0000110a-0000-1000-8000-00805f9b34fb"
 DISCOVERING = [False]
 ROOT = [None]  # BluezRoot instance (emits InterfacesAdded)
 
@@ -106,6 +114,11 @@ class BluezRoot(dbus.service.Object):
             "Pairable": dbus.Boolean(True)}}}
         for mac in DEVICES:
             objs[dev_path(mac)] = {"org.bluez.Device1": device_props(mac)}
+        for mac, tr in TRANSPORTS.items():
+            objs[dev_path(mac) + "/sep1/fd0"] = {"org.bluez.MediaTransport1": {
+                "Device": dbus.ObjectPath(dev_path(mac)),
+                "UUID": tr["uuid"], "State": tr["state"],
+                "Codec": dbus.Byte(0)}}
         return objs
 
     @dbus.service.signal("org.freedesktop.DBus.ObjectManager",
@@ -372,7 +385,21 @@ class Mock(dbus.service.Object):
 
     @dbus.service.method("org.vibb.Mock", in_signature="sb")
     def SetPcm(self, mac, present):
-        PCMS[str(mac).upper()] = bool(present)
+        mac = str(mac).upper()
+        PCMS[mac] = bool(present)
+        # real bluealsa only has a PCM once BlueZ configured the transport
+        if present:
+            TRANSPORTS[mac] = {"uuid": A2DP_SOURCE, "state": "idle"}
+        else:
+            TRANSPORTS.pop(mac, None)
+
+    @dbus.service.method("org.vibb.Mock", in_signature="sss")
+    def SetTransport(self, mac, uuid, state):
+        TRANSPORTS[str(mac).upper()] = {"uuid": str(uuid), "state": str(state)}
+
+    @dbus.service.method("org.vibb.Mock", in_signature="s")
+    def DropTransport(self, mac):
+        TRANSPORTS.pop(str(mac).upper(), None)
 
     @dbus.service.method("org.vibb.Mock", in_signature="s")
     def DropDevice(self, mac):
