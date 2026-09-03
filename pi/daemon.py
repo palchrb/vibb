@@ -164,6 +164,25 @@ def _local_volume(stored, pcm):
     """Volume to USE for this pcm — capped on the built-in speaker."""
     return _cap_local_volume(
         stored, pcm, load_settings().get("local_fallback_cap", 35))
+
+
+def _go_volume_cap(pcm):
+    """A live go-librespot reopen onto the HAT keeps the session's
+    volume — the level a parent set for HEADPHONES. Re-apply the cap for
+    the device it just landed on, at use (volume.json untouched), exactly
+    like the mpv live retarget does (PLAN-pipewire-soloist.md §F, NEW-1:
+    until 2026-09-02 Spotify reached the amplifier uncapped on every
+    path). Outside ORCH.lock: the API can be slow and the screen's 1/s
+    /status readers must not queue behind it."""
+    if pcm != OUTPUT_PCMS["local"]:
+        return
+    try:
+        v = _local_volume(ORCH._volume_setting(), pcm)
+        steps = go_status(timeout=2).get("volume_steps") or 65535
+        go("/player/volume", timeout=2, body={"volume": round(v * steps / 100)})
+        log(f"go-librespot on the speaker: volume capped to {v}")
+    except OSError:
+        pass
 NOW_FILE = os.path.join(STATE_DIR, "now-playing.json")
 QUEUE_FILE = os.path.join(STATE_DIR, "now-queue.json")
 
@@ -1835,6 +1854,7 @@ class Orchestrator:
             # resume and no restart to dedup, and the shared radio stays
             # quiet. This is the path on a current binary.
             go_action = "reopened live"
+            _go_volume_cap(pcm)  # the surviving volume is the headphone one
         else:
             # pre-v0.0.7 fallback: audio_device is startup config there,
             # so the switch is a config rewrite + restart that kills the
@@ -4987,6 +5007,7 @@ def _go_output_rebuild():
         # login never dropped, so skip the wait-for-login below.
         log("go-librespot output reopened live on the current device "
             "(no restart, session kept)")
+        _go_volume_cap(pcm)  # a rebuild onto the HAT lands at headphone level
         return
     # pre-v0.0.7 fallback: audio_device is startup config, so rebuilding
     # the device means a restart (which drops the session -> replay-last).
