@@ -44,11 +44,11 @@
 #                            PipeWire names roles after the PEER, so
 #                            a2dp_sink is the default here. S4 says
 #                            which one produces bluez_output.* nodes.
-#   WP_PROFILE=main-systemwide  WirePlumber 0.5.8 SHIPS a system-wide
-#                            profile (no logind/seat/reserve-device/
-#                            portal, all state-restore hooks off). The
-#                            plan §B guessed its own names; this is the
-#                            real thing. Fragments extend THIS profile.
+#   WP_PROFILE=main-embedded WirePlumber 0.5.8 SHIPS it: main +
+#                            mixin.systemwide-session (no logind/seat/
+#                            reserve-device/portal) + mixin.stateless
+#                            (every *.state restore hook off). Exactly
+#                            the box. Fragments extend THIS profile.
 #   WP_DISABLE_HOOKS=0       1 = also disable hooks.linking.target.
 #                            find-default + find-best (AM-6, real names).
 #                            If WirePlumber then refuses to start, the
@@ -66,8 +66,8 @@ RUN=/run/pipewire
 SOCK="$RUN/pipewire-0"
 STATE=/var/lib/vibb
 WP_ROLES="${WP_ROLES:-a2dp_sink}"
-WP_DISABLE_HOOKS="${WP_DISABLE_HOOKS:-0}"
-WP_PROFILE="${WP_PROFILE:-main-systemwide}"
+WP_DISABLE_HOOKS="${WP_DISABLE_HOOKS:-1}"   # bench 2026-09-03: REQUIRED (targetless linked to default without it) and safe
+WP_PROFILE="${WP_PROFILE:-main-embedded}"
 BT_MAC="${BT_MAC:-}"
 export PIPEWIRE_RUNTIME_DIR="$RUN"
 
@@ -109,7 +109,14 @@ mk_null_sink() {  # mk_null_sink <name> -> id
   sleep 0.5; node_id "$1"
 }
 rm_node() { [ -n "${1:-}" ] && pw-cli destroy "$1" >/dev/null 2>&1; sleep 0.5; }
-alsa_target() { echo "pipewire:SERVER=$SOCK,PLAYBACK_NODE=$1"; }   # stock 50-pipewire.conf args
+bench_pcm() {  # bench_pcm <node.name|-> -> a pcm name pinned to that node ("-" = no playback_node at all)
+  # Trixie's stock `pipewire:` pcm has no PLAYBACK_NODE arg (first run: "Unknown
+  # parameter"), so every pinned test pcm is written with the plan's own template.
+  local f=/etc/alsa/conf.d/98-vibb-bench-dyn.conf
+  if [ "$1" = - ]; then printf 'pcm.vibb_bench_dyn {\n    type pipewire\n    server "%s"\n}\n' "$SOCK" > "$f"
+  else printf 'pcm.vibb_bench_dyn {\n    type pipewire\n    server "%s"\n    playback_node "%s"\n}\n' "$SOCK" "$1" > "$f"; fi
+  echo vibb_bench_dyn
+}
 
 # ---------------------------------------------------------------------------
 cmd_check() {
@@ -254,6 +261,7 @@ context.properties = {
 context.objects = [
   { factory = adapter
     args = { factory.name = support.null-audio-sink  node.name = "vibb_null"
+             node.description = "vibb null sink (cache warming)"
              media.class = "Audio/Sink"  audio.position = [ FL FR ]
              monitor.channel-volumes = false  node.passive = true } }
 ]
@@ -267,9 +275,11 @@ stream.properties = {
 }
 EOF
   cat > /etc/wireplumber/wireplumber.conf.d/50-vibb.conf <<EOF
-# Extends the distro's '$WP_PROFILE' profile (0.5.8 ships it: no logind,
-# no seat monitoring, no reserve-device, no portal, every *.state restore
-# hook off). Only names from check's "provides" inventory are used here.
+# Extends the distro's '$WP_PROFILE' profile (0.5.8 ships main-embedded =
+# main + systemwide-session + stateless: no logind, no seat monitoring, no
+# reserve-device, no portal, every *.state restore hook off). Only names
+# from check's "provides" inventory are used here; the *.state lines are
+# belt in case WP_PROFILE is main-systemwide.
 wireplumber.profiles = {
   $WP_PROFILE = {
     hardware.video-capture         = disabled
@@ -434,7 +444,7 @@ cmd_test() {
   # ===================== S2d: absent target at open =====================
   say "S2d: open against a node that does not exist — must fail closed"
   err=$(mktemp)
-  timeout 5 aplay -q -D "$(alsa_target vibb_does_not_exist)" -f cd -t raw /dev/zero 2>"$err" & pid=$!
+  timeout 5 aplay -q -D "$(bench_pcm vibb_does_not_exist)" -f cd -t raw /dev/zero 2>"$err" & pid=$!
   sleep 1.5
   sid=$(stream_nodes | head -1)
   links=""; [ -n "$sid" ] && links=$(links_from "$sid")
@@ -453,7 +463,7 @@ cmd_test() {
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   if [ "$links" = "vibb_selftest_sink" ]; then ok "pinned stream ignored the default sink"; verdict PASS s1d_pinned_vs_default
   else bad "pinned stream linked to '${links:-nothing}' with default=vibb_selftest_B"; verdict KILL s1d_pinned_vs_default; fi
-  timeout 6 aplay -q -D "pipewire:SERVER=$SOCK" -f cd -t raw /dev/zero 2>/dev/null & pid=$!
+  timeout 6 aplay -q -D "$(bench_pcm -)" -f cd -t raw /dev/zero 2>/dev/null & pid=$!
   sleep 1.5; sid=$(stream_nodes | head -1); links=""; [ -n "$sid" ] && links=$(links_from "$sid")
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   if [ -z "$links" ]; then ok "targetless stream linked NOWHERE"; verdict PASS s1d_targetless
@@ -465,9 +475,9 @@ cmd_test() {
   say "S1a: settings names the plan uses (wpctl settings)"
   local s; s=$(wpctl settings 2>/dev/null || true)
   for k in linking.allow-moving-streams linking.follow-default-target node.stream.restore-props node.stream.restore-target device.restore-profile device.restore-routes bluetooth.autoswitch-to-headset-profile bluetooth.use-persistent-storage; do
-    if printf '%s' "$s" | grep -q "$k"; then ok "$k = $(printf '%s' "$s" | grep "$k" | head -1 | awk -F'[:=]' '{print $NF}' | tr -d ' ')"; else bad "$k NOT a known setting — fix the fragment name"; fi
+    if printf '%s' "$s" | grep -q "$k"; then ok "$(printf '%s' "$s" | grep "$k" | head -1 | sed 's/^ *//')"; else bad "$k NOT a known setting — fix the fragment name"; fi
   done
-  printf '%s' "$s" | grep -qE 'follow-default-target.*false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
+  printf '%s' "$s" | grep -qiE 'follow-default-target[^a-z]*false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
 
   # ===================== S3c: crash survival (AM-1 / AM-2) =====================
   say "S3c: kill -9 pipewire — socket path must survive, wireplumber must come back"
@@ -505,7 +515,7 @@ cmd_test() {
     local players; players=$(busctl --system --json=short call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null | jq -r '.data[0] | to_entries[] | select(.value["org.bluez.MediaPlayer1"]) | .key')
     note "MediaPlayer1 objects: ${players:-none} (plan J: on the box exactly one, vibb-mpris; here expect none => dummy-avrcp-player=false honoured)"
     say "S4 (ears): play a tone to $bn, press the HEADSET's own volume buttons (AM-17)"
-    timeout 12 aplay -q -D "$(alsa_target "$bn")" -f cd -t raw /dev/urandom 2>/dev/null & pid=$!
+    timeout 12 aplay -q -D "$(bench_pcm "$bn")" -f cd -t raw /dev/urandom 2>/dev/null & pid=$!
     read -r -p "  [operator] Did the headset's volume buttons change the level audibly? [y/n] " a; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     [ "${a:-n}" = y ] && verdict PASS s4_hw_volume_buttons || verdict FAIL s4_hw_volume_buttons
     note "AVDTP Suspend count vs keep-alive=120 (B4) and the PDU/RSS numbers (B6/B11) need btmon on a Zero 2 W — not measured here."
@@ -570,7 +580,7 @@ cmd_clean() {
   fi
   rm -f /etc/pipewire/pipewire.conf.d/10-vibb.conf /etc/pipewire/client.conf.d/10-vibb.conf
   rm -f /etc/wireplumber/wireplumber.conf.d/50-vibb.conf /etc/wireplumber/wireplumber.conf.d/51-vibb-hooks.conf
-  rm -f /etc/alsa/conf.d/99-vibb-bench.conf
+  rm -f /etc/alsa/conf.d/99-vibb-bench.conf /etc/alsa/conf.d/98-vibb-bench-dyn.conf
   [ "$MODE" = units ] && systemctl daemon-reload
   local u; u=$(desk_user); [ "$MODE" = procs ] && u=""
   [ -n "$u" ] && user_ctl "$u" unmask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && note "session PipeWire of '$u' unmasked (start it: systemctl --user start pipewire wireplumber)"

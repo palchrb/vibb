@@ -143,6 +143,38 @@ instead of refusing the local landing) and AM-17 (hw-volume on).
 
 ---
 
+## Bench findings 2026-09-03 — container run, PipeWire 1.4.2 / WirePlumber 0.5.8
+
+`bench/pipewire_platform_rig.sh` in a Trixie nspawn container on the
+Bookworm Pi 5 (host cards, udev and BlueZ bound in; daemons as plain
+processes, so S3c is a systemd fact still owed to a flash). Two runs:
+without and with the linking-hook disables. Verdicts:
+
+| Check | Result | Plan consequence |
+|---|---|---|
+| s3b client props | PASS | `client.conf.d stream.properties` DO reach pipewire-alsa streams (`node.dont-reconnect`/`dont-fallback` visible on the aplay node). Q3 verify tag resolved; AM-5's `PIPEWIRE_PROPS` stays belt. |
+| s2a named pcm | PASS | `type pipewire` + `server` + `playback_node` → `target.object` set, linked to the pinned node. §C's template is real. |
+| s1c no rescue | PASS | Target destroyed mid-stream → no link to any other sink. BLOCKER-1's mechanism is closable. |
+| s2c errno | ERROR (rc=1, `xrun: prepare error: No such file or directory`) | The plugin surfaces a vanished target as a write-path ERROR, not a blocked write → §E's "advance storm" shape = today's contract; the 8 s SIGKILL path stays as belt only. |
+| s1d pinned vs default | PASS | A pinned stream ignores `default.audio.sink`. |
+| s1d targetless | **KILL without AM-6, PASS with it** | A targetless stream links to the default sink unless `hooks.linking.target.find-default` AND `hooks.linking.target.find-best` are `disabled`. Both names are real, and WirePlumber starts with them off (they are not hard-required). **AM-6 is REQUIRED, with these names.** |
+| s1a settings | names exist | All eight `wireplumber.settings` keys in §B are real (`wpctl settings`). |
+| s5 names | recorded | Resolver prop keys confirmed: `alsa.card_name` and `api.alsa.card.name` both present on ALSA sinks; node name shape `alsa_output.platform-<addr>.<card>.<profile>`. `monitor.alsa.rules update-props` works (suspend=5 landed). |
+| s3a bus | PASS | The `pipewire` user can call `org.bluez` on the system bus. |
+| s2d absent target | invalid in run 1 (the stock `pipewire:` pcm has no `PLAYBACK_NODE` arg — rig fixed), re-run owed | — |
+| S4 (BT), S3c (units) | not yet run | owed: BT speaker via the host's bluetoothctl; S3c on a Trixie flash |
+
+**Amendments from the bench (applied to §A/§B):**
+
+| ID | Amendment |
+|---|---|
+| AM-21 | **No `PIPEWIRE_CONFIG_DIR` anywhere.** It REPLACES the config search path, so `/usr/share/pipewire/pipewire.conf` is never read and the daemon fails to start ("can't load config pipewire.conf"). The §A unit drops that line; `/etc/pipewire/pipewire.conf.d/` is picked up by the default search. |
+| AM-22 | **WirePlumber runs `-p main-embedded`.** 0.5.8 ships it: `main` + `mixin.systemwide-session` (no logind, no seat monitoring, no reserve-device, no portal) + `mixin.stateless` (`hooks.device.profile.state`, `hooks.device.routes.state`, `hooks.default-nodes.state`, `hooks.stream.state` all disabled). That IS §B's profile — the names §B guessed (`policy.linking.standard`, `policy.default-nodes`, `node.stream.restore`, `device.restore`) do not exist. The fragment only extends `main-embedded` with `hardware.video-capture`, `monitor.alsa-midi`, `monitor.bluez-midi` disabled, and the AM-23 hooks. `check` prints the full `provides` inventory so no name is guessed again. |
+| AM-23 | **AM-6 with real names, mandatory:** `hooks.linking.target.find-default = disabled` and `hooks.linking.target.find-best = disabled` in the profile. Proven required (targetless stream lands on the default sink otherwise) and proven safe (WirePlumber starts and links pinned streams with them off). The self-test's targetless probe (B.6 assertion 1) is the boot-time guard for exactly this. |
+| Note | WirePlumber logs `Failed to connect to session bus` (spa.dbus) and `telephony: failed to get session dbus connection` at every start in system mode — harmless (telephony = HFP, which roles exclude), but two journal lines per start; the install can set `DBUS_SESSION_BUS_ADDRESS=disabled:` on the unit to silence it (verify). |
+
+---
+
 # PART 1 — Architect design (2026-09-02), with QA-2 marks
 
 Grounded in tree `33af425`. Every PipeWire/WirePlumber key I am not certain of on Trixie (PipeWire 1.4.x, WirePlumber 0.5.x) is tagged **(verify on bench)**; the bench step that verifies it is named. Nothing in this document modifies the repo.
