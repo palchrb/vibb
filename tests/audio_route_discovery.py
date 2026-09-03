@@ -136,8 +136,11 @@ assert "pcm.vibb_bt {" in txt and "pcm.vibb_local {" in txt, "the NAMES survive"
 assert MAC in txt, "colon MAC kept for bt.py's idempotence check"
 assert 'playback_node "bluez_output.2C_FD_B3_FA_DA_04.1"' in txt
 assert 'playback_node "alsa_output.platform-soc_sound.stereo-fallback"' in txt
-assert txt.count(f'server "{audio.SOCKET}"') == 2
+assert txt.count(f'server "{audio.SOCKET}"') == 3, "bt, local, and the closed default"
 assert "bluealsa" not in txt
+assert "pcm.!default {" in txt and 'default "vibb_closed"' in txt \
+    and 'playback_node "vibb-closed-never"' in txt, "ALSA default fails closed (AM-15)"
+assert "VIBB_ALSA_DEFAULT" in txt, "vibb-extra opens it onto the HAT"
 txt2 = audio.asound_text(None, None, None)
 assert txt2.count(f'playback_node "{audio.UNRESOLVED}"') == 2, \
     "unresolved pins a node that cannot exist: opens fail closed"

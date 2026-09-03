@@ -431,7 +431,22 @@ def _disconnect_others(mac):
             btbus.disconnect_device(d["mac"])
 
 
+# Debian's pipewire-alsa maps ALSA 'default' to PipeWire through this file;
+# on a box rolled back to bluealsa an apt upgrade may recreate it, so the
+# bluealsa template pins 'default' to the HAT whenever it exists (AM-15).
+PW_DEFAULT_CONF = os.environ.get("VIBB_ALSA_PW_DEFAULT",
+                                 "/etc/alsa/conf.d/99-pipewire-default.conf")
+
+
 def _bluealsa_asound_text(mac):
+    default = ""
+    if os.path.exists(PW_DEFAULT_CONF):
+        default = '''# pipewire-alsa's 'default' override is installed: keep default on the HAT
+pcm.!default {
+    type plug
+    slave.pcm "hw:sndrpihifiberry"
+}
+'''
     return f'''# Managed by vibb (bt.py)
 pcm.vibb_bt {{
     type plug
@@ -447,7 +462,7 @@ pcm.vibb_local {{
     type plug
     slave.pcm "hw:sndrpihifiberry"
 }}
-'''
+''' + default
 
 
 def write_asound(text):

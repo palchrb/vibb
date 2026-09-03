@@ -221,4 +221,20 @@ pcm.vibb_local {{
     playback_node "{local_node}"
     hint.description "vibb: built-in speaker"
 }}
+# ALSA 'default' is CLOSED (a node that cannot exist: opens fail at
+# hw_params) unless vibb-extra opens it onto the HAT for an extra — so a
+# stray client never lands on whatever sink WirePlumber calls default.
+pcm.vibb_closed {{
+    type pipewire
+    server "{SOCKET}"
+    playback_node "vibb-closed-never"
+}}
+pcm.!default {{
+    type plug
+    slave.pcm {{
+        @func getenv
+        vars [ VIBB_ALSA_DEFAULT ]
+        default "vibb_closed"
+    }}
+}}
 '''

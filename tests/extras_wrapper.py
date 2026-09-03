@@ -211,4 +211,44 @@ r = subprocess.run(["bash", WRAPPER, "--run", script], env=env_dead,
 assert r.returncode == 0, r.stderr
 print("4. handoff survives a dead daemon OK")
 
+# 7. the PipeWire stack (PLAN-pipewire-soloist §H): --run stops the audio
+#    server too (reverse order: wireplumber, pipewire, the socket) so the
+#    extra gets the raw hw: device, and opens ALSA 'default' — closed for
+#    everyone else — onto the HAT for the extra only; --restore starts
+#    the trio back. bluealsa boxes (above) see none of it.
+stack_file = os.path.join(TMP, "audio-stack")
+with open(stack_file, "w") as f:
+    f.write("pipewire\n")
+env_pw = dict(env, VIBB_AUDIO_STACK_FILE=stack_file)
+DEFAULT_SEEN = os.path.join(TMP, "alsa-default")
+with open(script, "w") as f:
+    f.write(f'#!/bin/sh\ncp {LOG} {MARK}\necho "$VIBB_ALSA_DEFAULT" > {DEFAULT_SEEN}\n')
+os.unlink(LOG)
+r = subprocess.run(["bash", WRAPPER, "--run", script], env=env_pw,
+                   capture_output=True, text=True, timeout=30)
+assert r.returncode == 0, r.stderr
+before_script = open(MARK).read()
+assert "stop wireplumber pipewire pipewire.socket" in before_script, before_script
+assert before_script.index("stop go-librespot") < before_script.index("stop wireplumber"), \
+    "the ALSA client stops before the server"
+assert open(DEFAULT_SEEN).read().strip() == "hw:sndrpihifiberry", \
+    "the extra alone gets ALSA default on the HAT"
+os.unlink(LOG)
+r = subprocess.run(["bash", WRAPPER, "--restore"], env=env_pw,
+                   capture_output=True, text=True, timeout=30)
+assert r.returncode == 0, r.stderr
+started = [c.split()[-1] for c in open(LOG).read().splitlines() if c.startswith("start")]
+for unit in ("pipewire.socket", "pipewire", "wireplumber", "bluealsa", "bluetooth"):
+    assert unit in started, f"pipewire-mode restore must start {unit}: {started}"
+assert started.index("wireplumber") < started.index("bluetooth"), \
+    "the endpoint owner is up before bluetoothd"
+# and without the stack file: exactly today's set (no pipewire units)
+os.unlink(LOG)
+subprocess.run(["bash", WRAPPER, "--restore"], env=env, capture_output=True,
+               text=True, timeout=30)
+started = [c.split()[-1] for c in open(LOG).read().splitlines() if c.startswith("start")]
+assert "pipewire" not in started and "wireplumber" not in started
+print("7. pipewire stack: --run frees the server + opens default for the extra; "
+      "--restore brings the trio back; bluealsa untouched OK")
+
 print("\nall extras_wrapper checks passed")

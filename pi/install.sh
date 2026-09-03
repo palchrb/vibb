@@ -120,6 +120,13 @@ PKGS=(bluez bluez-alsa-utils libasound2-plugin-bluez alsa-utils curl jq
                                            # binary, so both get security
                                            # updates with everything else
       python3-dbus python3-gi)             # BlueZ D-Bus backend (PLAN-bt-dbus.md)
+# Audio stack (PLAN-pipewire-soloist.md): bluealsa (default) or pipewire.
+# The toggle lives in audio-stack.sh; bluealsa's packages stay in PKGS on
+# BOTH stacks — masked, never removed, so an offline rollback always works.
+. "$SCRIPT_DIR/audio-stack.sh"
+audio_stack_resolve
+# shellcheck disable=SC2207
+PKGS+=($(audio_stack_packages))
 missing=()
 for p in "${PKGS[@]}"; do have_pkg "$p" || missing+=("$p"); done
 if ((${#missing[@]})); then
@@ -227,6 +234,9 @@ fi
 # --- 3. configs --------------------------------------------------------------
 
 echo "==> [3/8] ALSA + go-librespot config..."
+# bluealsa only: under pipewire `audio_stack_route` (after the package
+# install below) writes asound.conf with both pcm names pinned to graph nodes.
+if [[ $AUDIO_STACK == bluealsa ]]; then
 # Placeholder ALSA device: play.sh rewrites this with your headset's MAC.
 if [[ ! -e /etc/asound.conf ]] || ! grep -q "bluealsa\|vibb_bt" /etc/asound.conf; then
   cat > /etc/asound.conf <<'EOF'
@@ -256,6 +266,7 @@ pcm.vibb_local {
 EOF
   echo "    added vibb_local pcm to /etc/asound.conf"
 fi
+fi  # bluealsa placeholder
 
 if [[ -f "$CONF_DIR/config.yml" ]]; then
   echo "    keeping existing $CONF_DIR/config.yml (delete it to regenerate)"
@@ -468,10 +479,11 @@ then
   echo "    bluetooth: bluetoothd restarts itself after a crash (on-failure)"
 fi
 systemctl enable --now bluetooth.service
-# Debian bookworm ships the daemon as bluealsa.service; newer releases as bluealsad.service
-systemctl enable --now bluealsa.service 2>/dev/null \
-  || systemctl enable --now bluealsad.service
+# The audio stack: bluealsa's daemon (today) or the PipeWire system units —
+# and the rollback between them. Everything in audio-stack.sh.
+audio_stack_apply
 
+if [[ $AUDIO_STACK == bluealsa ]]; then  # the keep-alive is a bluealsa knob
 # A2DP transport keep-alive: stock bluealsa tears the transport down the
 # instant the last PCM client closes ('keep-alive: 0 ms' in the journal),
 # so every switch to the built-in speaker and back — and every pause/play
@@ -487,6 +499,7 @@ BA_UNIT=""
 for u in bluealsa.service bluealsad.service; do
   systemctl cat "$u" >/dev/null 2>&1 && BA_UNIT="$u" && break
 done
+fi
 if [[ -n $BA_UNIT ]]; then
   # first ExecStart= in systemctl cat is the distro unit's own line (our
   # drop-in, if present, appears after) — so re-runs read the base line
@@ -540,6 +553,7 @@ StartLimitBurst=6
 
 [Service]
 User=$RUN_USER
+$(audio_stack_unit_env)
 # network-online.target fires the instant NetworkManager 'finishes
 # starting' — before wlan0 has a DHCP lease AND before systemd-resolved
 # answers, so at boot go-librespot's first Spotify AP lookup hit a dead
@@ -623,15 +637,20 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-write_if_changed /etc/systemd/system/vibb-bt-reconnect.service <<'EOF' && RECON_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-bt-reconnect.service <<EOF && RECON_CHANGED=1
 [Unit]
 Description=Vibb BT reconnect daemon (event-driven, btwatchd)
-After=bluetooth.service bluealsa.service bluealsad.service
+# after whoever owns the A2DP endpoint (bluealsa, or WirePlumber under pipewire)
+After=bluetooth.service $(audio_stack_endpoint_units)
 Wants=bluetooth.service
 
 [Service]
 # Kill switch: systemctl edit vibb-bt-reconnect ->
 #   [Service] Environment=VIBB_BT_BACKEND=cli   (poll-loop fallback)
+$(audio_stack_unit_env)
+# the transport-gate shadow compare at 1/s here: _await_pcm polls 1/s for
+# <=10s per connect, so a <3s transport flicker is visible (AM-12c)
+Environment=VIBB_BT_GATE_SHADOW_S=1
 ExecStart=/usr/bin/python3 /usr/local/bin/vibb-btwatchd
 Restart=always
 RestartSec=5
@@ -685,6 +704,10 @@ done
 rm -f /usr/local/bin/nrk.py
 # btwatchd imports vibb.bt — a package change must restart it too
 [[ $PKG_CHANGED -eq 1 ]] && RECON_CHANGED=1
+# asound.conf for the stack: pipewire pins both pcm names to graph nodes
+# (needs the package just installed and WirePlumber, up since step 4);
+# bluealsa is today's rewrite when a speaker is remembered.
+audio_stack_route
 
 RFID_CHANGED=$PKG_CHANGED
 install_if_changed 755 "$SCRIPT_DIR/rfid.py"   /usr/local/bin/vibb-rfid   && RFID_CHANGED=1
@@ -1153,6 +1176,7 @@ Description=Vibb orchestration daemon (playback state + API)
 
 [Service]
 Environment=VIBB_GO_CONFIG=$CONF_DIR/config.yml
+$(audio_stack_unit_env)
 ExecStart=/usr/bin/python3 /usr/local/bin/vibb-daemon
 Restart=always
 RestartSec=5

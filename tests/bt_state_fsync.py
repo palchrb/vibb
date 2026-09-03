@@ -16,6 +16,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp()
 os.environ["VIBB_BT_FILE"] = os.path.join(TMP, "bt-headset")
 os.environ["VIBB_ASOUND"] = os.path.join(TMP, "asound.conf")
+os.environ["VIBB_ALSA_PW_DEFAULT"] = os.path.join(TMP, "99-pipewire-default.conf")
 sys.path.insert(0, os.path.join(REPO, "pi"))
 
 from vibb import bt  # noqa: E402
@@ -46,6 +47,13 @@ assert len(SYNCED) == 2, "asound write must fsync the data before the rename"
 # already-routed MAC: no rewrite, no extra fsync (SD wear)
 bt._route_alsa("AA:BB:CC:DD:EE:FF")
 assert len(SYNCED) == 2, "an unchanged route must not rewrite the file"
+assert "pcm.!default" not in body, "a never-migrated box keeps today's file"
+# a box rolled back from pipewire: apt may recreate pipewire-alsa's
+# 'default' override — the template then pins default to the HAT (AM-15)
+open(os.environ["VIBB_ALSA_PW_DEFAULT"], "w").write("pcm.!default pipewire\n")
+assert 'slave.pcm "hw:sndrpihifiberry"' in \
+    bt._bluealsa_asound_text("AA:BB:CC:DD:EE:FF").split("pcm.!default")[1]
+os.remove(os.environ["VIBB_ALSA_PW_DEFAULT"])
 print("2. asound.conf fsyncs before rename; unchanged route no-ops OK")
 
 # 3. the same contract under the PipeWire stack: the pcm NAMES survive,

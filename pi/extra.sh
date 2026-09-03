@@ -40,6 +40,14 @@ HANDOFF="vibb-idle vibb-buttons vibb-ui"
 # script stops is the script's own business.
 RESTORE="bluetooth bluealsa go-librespot vibb-daemon vibb-mpris
          vibb-bt-reconnect vibb-buttons vibb-idle vibb-ui"
+# Under the PipeWire stack the audio server owns the HAT (PLAN-pipewire-
+# soloist §H): --run stops it so an extra gets the raw hw: device, and
+# the restore set carries it. A masked unit's start is a harmless no-op,
+# so one RESTORE list serves both stacks.
+AUDIO_STACK="$(cat "${VIBB_AUDIO_STACK_FILE:-/etc/vibb/audio-stack}" 2>/dev/null || echo bluealsa)"
+AUDIO_UNITS=""
+[ "$AUDIO_STACK" = pipewire ] && AUDIO_UNITS="pipewire.socket pipewire wireplumber"
+RESTORE="$RESTORE $AUDIO_UNITS"
 
 CPUS="${VIBB_CPUFREQ:-/sys/devices/system/cpu}"
 GOV_STATE="${VIBB_RUN:-/run}/vibb-extra-governor"
@@ -70,6 +78,13 @@ case "${1:-}" in
          -d '{"keep":true}' "$API/stop" >/dev/null 2>&1 || true
     $SYSTEMCTL stop $HANDOFF
     $SYSTEMCTL stop go-librespot 2>/dev/null || true  # frees I2S/ALSA
+    if [ "$AUDIO_STACK" = pipewire ]; then
+      # the server holds the HAT; stop it (reverse order) and open ALSA
+      # 'default' — closed for everyone else (AM-15) — onto the HAT for
+      # the extra only
+      $SYSTEMCTL stop wireplumber pipewire pipewire.socket 2>/dev/null || true
+      export VIBB_ALSA_DEFAULT=hw:sndrpihifiberry
+    fi
     exec "$script"
     ;;
   --restore)
@@ -109,8 +124,9 @@ case "${1:-}" in
     # moment the extra ends), network-independent audio plumbing next,
     # and go-librespot ASYNC last: its unit pulls network-online, and
     # nobody needs to wait for a Spotify login to see the menu.
+    # shellcheck disable=SC2086
     for u in vibb-ui vibb-idle vibb-buttons vibb-daemon \
-             vibb-mpris vibb-bt-reconnect bluetooth bluealsa; do
+             vibb-mpris vibb-bt-reconnect $AUDIO_UNITS bluetooth bluealsa; do
       $SYSTEMCTL start "$u" 2>/dev/null || true
     done
     $SYSTEMCTL start --no-block go-librespot 2>/dev/null || true
