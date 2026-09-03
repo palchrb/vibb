@@ -96,8 +96,19 @@ cmd_check() {
     if command -v "$b" >/dev/null 2>&1; then ok "$b"; else bad "missing: $b"; fi
   done
   for b in btmon bluetoothctl soloist; do command -v "$b" >/dev/null 2>&1 && ok "$b (optional)" || note "optional, missing: $b"; done
-  say "versions (plan assumes PipeWire 1.4.x / WirePlumber 0.5.x)"
+  say "versions (plan assumes PipeWire 1.4.x / WirePlumber 0.5.x = Debian trixie)"
   pipewire --version 2>/dev/null | sed 's/^/       /'; wireplumber --version 2>/dev/null | sed 's/^/       /'
+  local wpv; wpv=$(wireplumber --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$wpv" ] && [ "$(printf '%s\n' "$wpv" 0.5 | sort -V | head -1)" != 0.5 ]; then
+    bad "WirePlumber $wpv is the 0.4 series (Bookworm). The whole plan §B policy is"
+    note "written in the 0.5 SPA-JSON schema (wireplumber.conf.d, wireplumber.profiles,"
+    note "wireplumber.settings) which 0.4 IGNORES — it reads Lua under main.lua.d."
+    note "Every S1/S4 verdict here would measure 0.4 DEFAULTS, not the design."
+    note "This bench must be Raspberry Pi OS TRIXIE (also the Soloist glibc floor)."
+    note "  cat /etc/os-release | head -3"
+    note "Refusing to continue. FORCE=1 overrides (S2/S3 mechanics only)."
+    [ "${FORCE:-0}" = 1 ] || exit 3
+  fi
   say "packages"
   for p in pipewire pipewire-bin pipewire-alsa wireplumber libspa-0.2-bluetooth; do
     dpkg -s "$p" >/dev/null 2>&1 && ok "$p" || bad "$p not installed — apt install --no-install-recommends $p"
@@ -319,7 +330,9 @@ cmd_start() {
   sleep 2
   systemctl is-active wireplumber.service >/dev/null && ok "wireplumber active" || { bad "wireplumber not active:"; journalctl -u wireplumber -n 30 --no-pager | sed 's/^/       /'; }
   say "graph"
-  wpctl status 2>/dev/null | sed 's/^/       /' | head -50
+  # wpctl can block forever when the session manager never publishes its
+  # metadata (seen on a 0.4 bench) — never let a status print hang the rig
+  timeout 10 wpctl status 2>/dev/null | sed 's/^/       /' | head -50 || note "wpctl status timed out (10 s) — WirePlumber is up but not publishing; check journalctl -u wireplumber"
 }
 
 # ---------------------------------------------------------------------------
