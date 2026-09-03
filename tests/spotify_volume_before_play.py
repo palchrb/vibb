@@ -80,6 +80,16 @@ vols = [b["volume"] for p, b in seq if p == "/player/volume"]
 assert vols and all(v == 90 for v in vols), f"headphones keep 90, got {vols}"
 print("2. bt pcm: the stored level, uncapped OK")
 
+# 3b: AM-7 — fail-safety caps the bt pcm too
+from vibb import audio  # noqa: E402
+
+audio.cap_everywhere = lambda: True
+seq = run("vibb_bt")
+vols = [b["volume"] for p, b in seq if p == "/player/volume"]
+assert vols and all(v == 35 for v in vols), f"fail-safety: headphones capped too, got {vols}"
+audio.cap_everywhere = lambda: False
+print("3b. fail-safety caps the bt pcm as well OK")
+
 # 4: never written back
 with open(os.path.join(TMP, "volume.json")) as f:
     assert json.load(f)["volume"] == 90

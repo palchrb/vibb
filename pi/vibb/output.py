@@ -19,7 +19,7 @@ def log(msg):
     print(f"vibbd: {msg}", flush=True)
 
 
-def local_volume(stored, pcm, cap):
+def local_volume(stored, pcm, cap, everywhere=False):
     """The volume to actually use, given where the sound is going.
 
     The built-in speaker and a pair of headphones do not share a scale,
@@ -35,8 +35,13 @@ def local_volume(stored, pcm, cap):
     only writer and must keep meaning "what the user chose"), so the
     headphone level is still there when the headphones come back.
     cap=0 disables the whole thing.
+
+    everywhere=True (AM-7): the audio policy self-test found a SAFETY
+    drift — a stream might reach the HAT without vibb choosing it — so
+    until the next green run the cap applies on EVERY output. Nothing is
+    refused (the bedtime rule); the worst case anywhere is the cap.
     """
-    if not cap or pcm != OUTPUT_PCMS["local"]:
+    if not cap or (pcm != OUTPUT_PCMS["local"] and not everywhere):
         return stored
     return min(stored, cap)
 

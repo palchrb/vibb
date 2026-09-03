@@ -175,8 +175,10 @@ def _apply_box_volume():
             v = max(0, min(100, round(json.load(f)["volume"])))
     except (OSError, ValueError, KeyError, TypeError):
         return  # never set through the box yet — leave as is
+    from vibb import audio
     v = local_volume(v, output_pcm(),
-                     read_settings().get("local_fallback_cap", 35))
+                     read_settings().get("local_fallback_cap", 35),
+                     everywhere=audio.cap_everywhere())
     try:
         steps = spotify.status().get("volume_steps") or 65535
         spotify.go("/player/volume", body={"volume": round(v * steps / 100)})
@@ -637,8 +639,10 @@ def main():
     # of headphones do not share a scale — cap what reaches the amplifier
     # (never written back, so the headphone level survives).
     pcm = output_pcm()
+    from vibb import audio
     volume = local_volume(
-        volume, pcm, read_settings().get("local_fallback_cap", 35))
+        volume, pcm, read_settings().get("local_fallback_cap", 35),
+        everywhere=audio.cap_everywhere())
     _wait_sink(pcm)  # pipewire: the node must exist or this exits 75
     proc = subprocess.Popen(mpv_command(urls, volume, sock, pcm,
                                         paused=bool(start_pos)))

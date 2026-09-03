@@ -96,4 +96,32 @@ with open(daemon.VOL_FILE) as f:
     assert json.load(f)["volume"] == 90
 print("6. volume.json untouched OK")
 
+# 7. AM-7: while the policy self-test says fail-safety, every path caps
+#    on EVERY output — a live reopen onto headphones too, and the live
+#    volume knob cannot exceed the cap
+import json as _json  # noqa: E402
+
+daemon._audio.POLICY_FILE = os.path.join(os.environ["VIBB_RUN"], "policy.json")
+os.environ["VIBB_AUDIO_STACK"] = "pipewire"; daemon._audio._stack[0] = None
+daemon._audio.sink_ready = lambda out, mac=None, dump=None: True   # the node exists
+with open(daemon._audio.POLICY_FILE, "w") as f:
+    _json.dump({"verdict": "fail-safety", "safety": ["targetless-linked"], "rf": []}, f)
+daemon._audio._policy_cache["mtime"] = None
+CALLS.clear()
+orch.set_output("bt")
+assert volume_posts() == [35], f"fail-safety: the bt reopen is capped too: {volume_posts()}"
+orch.source = "spotify"
+CALLS.clear()
+r = orch.volume(absolute=80)
+assert r["volume"] == 35 and volume_posts() == [35], (r, volume_posts())
+orch.source = None
+with open(daemon._audio.POLICY_FILE, "w") as f:
+    _json.dump({"verdict": "ok", "safety": [], "rf": []}, f)
+daemon._audio._policy_cache["mtime"] = None
+CALLS.clear()
+orch._save_volume(90)
+orch.set_output("bt")
+assert volume_posts() == [], "green again: headphones keep their level"
+print("7. fail-safety caps every landing and the live knob; green lifts it OK")
+
 print("\nall local_volume_all_paths checks passed")

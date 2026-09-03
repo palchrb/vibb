@@ -162,9 +162,11 @@ VOL_FILE = os.path.join(STATE_DIR, "volume.json")
 
 
 def _local_volume(stored, pcm):
-    """Volume to USE for this pcm — capped on the built-in speaker."""
+    """Volume to USE for this pcm — capped on the built-in speaker (and
+    on every output while the audio policy self-test says fail-safety)."""
     return _cap_local_volume(
-        stored, pcm, load_settings().get("local_fallback_cap", 35))
+        stored, pcm, load_settings().get("local_fallback_cap", 35),
+        everywhere=_audio.cap_everywhere())
 
 
 def _go_volume_cap(pcm):
@@ -175,7 +177,7 @@ def _go_volume_cap(pcm):
     until 2026-09-02 Spotify reached the amplifier uncapped on every
     path). Outside ORCH.lock: the API can be slow and the screen's 1/s
     /status readers must not queue behind it."""
-    if pcm != OUTPUT_PCMS["local"]:
+    if pcm != OUTPUT_PCMS["local"] and not _audio.cap_everywhere():
         return
     try:
         v = _local_volume(ORCH._volume_setting(), pcm)
@@ -1017,6 +1019,11 @@ class Orchestrator:
         mpv gets its softvol (0-100); Spotify gets go-librespot's volume
         scaled from our 0-100 to its volume_steps."""
         cap = load_settings()["volume_cap"]  # child-safety ceiling
+        if _audio.cap_everywhere():
+            # AM-7: a safety drift in the audio policy — the live knob
+            # cannot exceed the landing cap anywhere until the next green
+            # self-test (the value shown stays what the user chose)
+            cap = min(cap, load_settings().get("local_fallback_cap", 35))
         if self.source == "sonos":
             # No cap on the remote renderer (owner decision 2026-08-09):
             # the amplifier is a family speaker in a shared room, not the

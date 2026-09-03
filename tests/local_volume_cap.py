@@ -38,6 +38,10 @@ assert local_volume(90, BT, 35) == 90, "headphones keep their own level"
 assert local_volume(20, LOCAL, 35) == 20, "already quieter: leave it alone"
 assert local_volume(90, LOCAL, 0) == 90, "cap 0 = disabled"
 assert local_volume(100, LOCAL, 100) == 100
+# AM-7: a safety drift in the audio policy caps EVERY output
+assert local_volume(90, BT, 35, everywhere=True) == 35
+assert local_volume(90, LOCAL, 35, everywhere=True) == 35
+assert local_volume(90, BT, 0, everywhere=True) == 90, "cap 0 still disables"
 print("1. capped on the speaker only, never raised, 0 disables OK")
 
 # 2. it is a real setting, with a default and a range
