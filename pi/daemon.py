@@ -123,6 +123,7 @@ for _p in (_here, "/usr/local/lib/vibb-py"):
             sys.path.insert(0, _p)
         break
 from vibb import backup as _backup  # noqa: E402 — state snapshots to restic
+from vibb import audio as _audio  # noqa: E402
 from vibb import content, mpv as _mpv, spotify as _spotify  # noqa: E402
 from vibb import renderer as _renderer  # noqa: E402 — sonos axis+client
 from vibb import spotify_web as _spotify_web  # noqa: E402
@@ -1742,6 +1743,13 @@ class Orchestrator:
         pcm = OUTPUT_PCMS.get(device)
         if not pcm:
             return None  # handler answers 400
+        if fallback and device == "bt" and _audio.stack() == "pipewire":
+            # btwatchd's announce: the speaker's node may be new (first
+            # connect after boot) or renamed (package upgrade) since
+            # asound.conf was written, and this path is about to point
+            # mpv/go-librespot at vibb_bt. Refresh the pin FIRST — file
+            # only, the single reopen below stays the one reopen (AM-10).
+            _audio.ensure_bt_route(_speaker_mac())
         if fallback and device == "local" and not _i2s_card_present():
             # btwatchd's speaker-away fallback: without a built-in/HAT
             # card there is nothing to fall back TO — keep bt configured
@@ -1751,7 +1759,7 @@ class Orchestrator:
         if fallback and current_output()["output"] == device:
             # converge anyway: a deferred mpv switch (transport wasn't up
             # when the user flipped the output) applies on this announce
-            if device == "bt" and _bt_transport_ready():
+            if device == "bt" and _bt_output_ready():
                 with self.lock:
                     if self._mpv_alive():
                         try:
@@ -1796,7 +1804,7 @@ class Orchestrator:
                 _kick_bt_connect()
             mpv_switched = False
             if self._mpv_alive():
-                if device == "bt" and not _bt_transport_ready():
+                if device == "bt" and not _bt_output_ready():
                     # NEVER point a live mpv at a bluealsa device with no
                     # A2DP transport: it errors the track and skips to the
                     # next, over and over (field: 'jumps between episodes
@@ -1839,7 +1847,7 @@ class Orchestrator:
         # the screen's 1/s poll — for the whole switch (review R2).
         restarted = False
         go_action = "unchanged"
-        if device == "bt" and not _bt_transport_ready():
+        if device == "bt" and not _bt_output_ready():
             # same rule as mpv above: don't bounce go-librespot into a
             # device with no transport — the restart's wifi burst lands
             # exactly during AVDTP setup on the SHARED radio (the
@@ -4699,14 +4707,29 @@ def _bt_recover(verb):
         return False
 
 
-def _bt_transport_ready():
-    """Does the configured speaker have a live A2DP PCM right now?"""
+def _speaker_mac():
     try:
         with open(_bt.MAC_FILE) as f:
-            mac = f.read().strip()
-        return bool(mac) and btbus.a2dp_pcm_present(mac)
+            return f.read().strip()
     except OSError:
+        return ""
+
+
+def _bt_transport_ready():
+    """Does the configured speaker have a live A2DP PCM right now?"""
+    mac = _speaker_mac()
+    return bool(mac) and btbus.a2dp_pcm_present(mac)
+
+
+def _bt_output_ready():
+    """The transport AND, under pipewire, the sink node (AM-11): a pcm
+    pinned to a node that is not there yet fails at hw_params, and the
+    transport precedes its node by milliseconds. Only for the switch
+    paths (one pw-dump each) — the 1/s readers keep the D-Bus gate."""
+    if not _bt_transport_ready():
         return False
+    return (_audio.stack() != "pipewire"
+            or _audio.sink_ready("bt", _speaker_mac()))
 
 
 _BT_HEAL = {"lock": threading.Lock(), "last": 0.0}

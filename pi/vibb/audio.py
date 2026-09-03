@@ -14,6 +14,7 @@ version detail, and the HAT's name embeds a platform path (bench
 
 import json
 import os
+import re
 import subprocess
 
 STACK_FILE = os.environ.get("VIBB_AUDIO_STACK_FILE", "/etc/vibb/audio-stack")
@@ -144,6 +145,51 @@ def recover_units():
     if os.environ.get("VIBB_BT_HEAL_RESTART_WP") == "1":
         return ("wireplumber",)
     return ()
+
+
+def pinned_node(text, pcm):
+    """The playback_node a pcm block in asound.conf pins, or None."""
+    m = re.search(r"pcm\." + re.escape(pcm) + r"\s*\{.*?playback_node\s+\"([^\"]+)\"",
+                  text, re.S)
+    node = m.group(1) if m else None
+    return None if node in (None, UNRESOLVED) else node
+
+
+def ensure_bt_route(mac):
+    """The daemon's writer on btwatchd's announce (AM-10): the speaker's
+    node may be NEW (first connect after boot) or RENAMED (package
+    upgrade) since asound.conf was written, and the announce is about to
+    retarget mpv onto vibb_bt. File ONLY — never a go-librespot reopen;
+    the announce path already does its single reopen. One pw-dump per
+    announce, never per second. Skips when bt.py owns the radio (it
+    writes the route itself) rather than block the HTTP thread. Returns
+    True when the file was rewritten."""
+    if not mac or stack() != "pipewire":
+        return False
+    from vibb import bt as _bt  # lazy: bt imports audio lazily too
+    try:
+        with open(_bt.ASOUND) as f:
+            cur = f.read()
+    except OSError:
+        cur = ""
+    bt_node, local_node = resolve_route(mac, tries=1)
+    if bt_node is None:
+        return False   # not in the graph yet — nothing true to write
+    local_node = local_node or pinned_node(cur, "vibb_local")  # keep a
+    #   pinned HAT when this dump did not show it (never regress to unresolved)
+    text = asound_text(mac, bt_node, local_node)
+    if text == cur:
+        return False
+    lock = _bt.acquire_process_lock(blocking=False)
+    if lock is None:
+        log("asound route: bt.py owns the radio — it writes the route itself")
+        return False
+    try:
+        _bt.write_asound(text)
+        log(f"asound route refreshed on announce: {mac} -> {bt_node}")
+        return True
+    finally:
+        lock.close()
 
 
 def asound_text(mac, bt_node, local_node):
