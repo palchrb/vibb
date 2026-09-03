@@ -48,7 +48,7 @@ for _p in (_HERE, "/usr/local/lib/vibb-py"):
             sys.path.insert(0, _p)
         break
 from vibb import content, mpv as _mpv, radio, spotify  # noqa: E402
-from vibb.output import audio_ready, local_volume  # noqa: E402
+from vibb.output import OUTPUT_PCMS, audio_ready, local_volume  # noqa: E402
 from vibb.paths import STATE_DIR, note_go_restart, read_settings  # noqa: E402
 
 is_spotify = spotify.is_spotify
@@ -261,6 +261,7 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
     # /player/play (below, kept as belt) it left the first 0.5-2s of every
     # Spotify landing on the HAT at headphone level (QA 2026-09-02, AM-13).
     _apply_box_volume()
+    _wait_sink(output_pcm())  # pipewire: same fail-closed rule as mpv
 
     body = {"uri": uri}
     if start_uri:
@@ -337,6 +338,35 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
 
 
 PAUSE_CONFIRM_S = float(os.environ.get("VIBB_PAUSE_CONFIRM_S", "2.5"))
+
+
+def _wait_sink(pcm):
+    """pipewire only: a pcm pinned to an absent node fails at hw_params,
+    and the node can lag the transport (BT) or WirePlumber's start (the
+    HAT, first tap after a reboot — NEW-3). Wait a bounded moment, then
+    FAIL CLOSED with EX_TEMPFAIL: the daemon's healer respawns exactly
+    when the node exists and never charges rc 75 to its crash budget
+    (AM-9). Never 'spawn anyway' — that is the advance storm."""
+    from vibb import audio
+    if audio.stack() != "pipewire":
+        return
+    from vibb import bt as _bt
+    output = "local" if pcm == OUTPUT_PCMS["local"] else "bt"
+    try:
+        mac = open(_bt.MAC_FILE).read().strip()
+    except OSError:
+        mac = ""
+    deadline = time.monotonic() + audio.SINK_WAIT_S
+    while True:
+        if audio.sink_ready(output, mac):
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    log(f"no PipeWire sink node for {pcm} after {audio.SINK_WAIT_S:.0f}s — "
+        f"not starting (exit {audio.SINK_WAIT_EXIT}; the daemon retries "
+        "when it appears)")
+    sys.exit(audio.SINK_WAIT_EXIT)
 
 
 def _spotify_down(e):
@@ -609,6 +639,7 @@ def main():
     pcm = output_pcm()
     volume = local_volume(
         volume, pcm, read_settings().get("local_fallback_cap", 35))
+    _wait_sink(pcm)  # pipewire: the node must exist or this exits 75
     proc = subprocess.Popen(mpv_command(urls, volume, sock, pcm,
                                         paused=bool(start_pos)))
     terminated = []  # set when WE are told to stop (reboot/daemon restart)

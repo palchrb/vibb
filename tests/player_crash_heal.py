@@ -176,6 +176,24 @@ wait_for("watchdog-driven respawn", lambda: SPAWNED)
 assert SPAWNED == [TARGET]
 print("12. the stall watchdog's dead-child branch runs the healer OK")
 
+# 13. rc 75 = the player declined to spawn into a void (pipewire: the
+# sink node was not there yet, AM-9). Respawned when the output is ready,
+# but NEVER charged to the 2-per-boot budget — two node flaps must not
+# silence the box. A real crash right after still charges.
+crash(rc=daemon._audio.SINK_WAIT_EXIT)
+publish()
+assert orch._heal_crashed_child(0.0) == 0.0 and SPAWNED == [TARGET]
+assert orch._crash_respawns == 0, "rc 75 is not a crash"
+crash(rc=daemon._audio.SINK_WAIT_EXIT)
+publish()
+orch._crash_respawns = 2                   # budget already spent by real crashes
+assert orch._heal_crashed_child(0.0) > 0.0 and not SPAWNED, \
+    "an exhausted budget still stands — rc 75 only never SPENDS it"
+crash(rc=-9)
+publish()
+assert orch._heal_crashed_child(0.0) == 0.0 and orch._crash_respawns == 1
+print("13. the sink-wait exit (75) respawns without charging the budget OK")
+
 print("PLAYER CRASH HEAL OK — a died-mid-audiobook player comes back on "
       "its own, and nothing ever restarts into a pause, another target, "
       "a missing output, or beyond the no-surprise-audio window.")

@@ -24,6 +24,11 @@ SOCKET = os.environ.get("VIBB_PW_SOCKET", "/run/pipewire/pipewire-0")
 LOCAL_CARD = os.environ.get("VIBB_LOCAL_CARD", "hifiberry")
 UNRESOLVED = "vibb-unresolved"   # a node that never exists: opens fail at
 #                                  hw_params (bench s2d), never at some sink
+# The player's "the sink node is not there yet" exit (EX_TEMPFAIL): the
+# daemon's crash healer respawns it when the node exists and never
+# charges it against the 2-per-boot budget (AM-9).
+SINK_WAIT_EXIT = 75
+SINK_WAIT_S = float(os.environ.get("VIBB_SINK_WAIT_S", "5"))
 
 _stack = [None]
 

@@ -677,8 +677,15 @@ class Orchestrator:
         with self.lock:
             if self.child is not child or self._mpv_alive():
                 return 0.0  # another path already spawned/stopped it
-            self._crash_respawns += 1
-            log(f"player died (rc {child.poll()}) while playing — "
+            rc = child.poll()
+            if rc != _audio.SINK_WAIT_EXIT:
+                self._crash_respawns += 1
+            else:
+                # 'the sink node was not there yet' (pipewire, AM-9) is
+                # not a crash: the player declined to spawn into a void
+                # and _audio_ready() above says the node exists NOW
+                pass
+            log(f"player died (rc {rc}) while playing — "
                 f"respawning ({self._crash_respawns}/2 this boot)")
             self.child = None
             self._spawn(target, reverse=reverse, resume=resume,
