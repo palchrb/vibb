@@ -475,9 +475,10 @@ cmd_test() {
   say "S1a: settings names the plan uses (wpctl settings)"
   local s; s=$(wpctl settings 2>/dev/null || true)
   for k in linking.allow-moving-streams linking.follow-default-target node.stream.restore-props node.stream.restore-target device.restore-profile device.restore-routes bluetooth.autoswitch-to-headset-profile bluetooth.use-persistent-storage; do
-    if printf '%s' "$s" | grep -q "$k"; then ok "$(printf '%s' "$s" | grep "$k" | head -1 | sed 's/^ *//')"; else bad "$k NOT a known setting — fix the fragment name"; fi
+    # 0.5.8 prints "- Name: <key>" then "  Value: <v>" on the next line
+    if printf '%s' "$s" | grep -q "Name: $k"; then ok "$k = $(printf '%s' "$s" | grep -A1 "Name: $k" | grep -oE 'Value: .*' | head -1 | cut -c8-)"; else bad "$k NOT a known setting — fix the fragment name"; fi
   done
-  printf '%s' "$s" | grep -qiE 'follow-default-target[^a-z]*false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
+  printf '%s' "$s" | grep -A1 'Name: linking.follow-default-target' | grep -qiE 'Value: *false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
 
   # ===================== S3c: crash survival (AM-1 / AM-2) =====================
   say "S3c: kill -9 pipewire — socket path must survive, wireplumber must come back"

@@ -161,7 +161,7 @@ without and with the linking-hook disables. Verdicts:
 | s1a settings | names exist | All eight `wireplumber.settings` keys in §B are real (`wpctl settings`). |
 | s5 names | recorded | Resolver prop keys confirmed: `alsa.card_name` and `api.alsa.card.name` both present on ALSA sinks; node name shape `alsa_output.platform-<addr>.<card>.<profile>`. `monitor.alsa.rules update-props` works (suspend=5 landed). |
 | s3a bus | PASS | The `pipewire` user can call `org.bluez` on the system bus. |
-| s2d absent target | invalid in run 1 (the stock `pipewire:` pcm has no `PLAYBACK_NODE` arg — rig fixed), re-run owed | — |
+| s2d absent target | PASS (run 3) | A pcm whose `playback_node` does not exist fails at `snd_pcm_hw_params` ("Unable to install hw params") — closed at OPEN, before any link. mpv's AO init fails the same way a bluealsa pcm without a transport does today, so §C's deferred-switch refusal keeps its exact error shape. |
 | S4 (BT), S3c (units) | not yet run | owed: BT speaker via the host's bluetoothctl; S3c on a Trixie flash |
 
 **Amendments from the bench (applied to §A/§B):**
