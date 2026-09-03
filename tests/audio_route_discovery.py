@@ -143,4 +143,29 @@ assert txt2.count(f'playback_node "{audio.UNRESOLVED}"') == 2, \
     "unresolved pins a node that cannot exist: opens fail closed"
 print("6. asound_text: names, MAC, server, pinned nodes, fail-closed OK")
 
+# 7. resolve_route: waits for the BT node (bounded), local from the same dump
+open(fake, "w").write(f"#!/bin/sh\ncat {TMP}/dump.json\n")
+assert audio.resolve_route(MAC, tries=3, delay=0) == (
+    "bluez_output.2C_FD_B3_FA_DA_04.1",
+    "alsa_output.platform-soc_sound.stereo-fallback")
+assert audio.resolve_route(None, tries=3, delay=0) == (
+    None, "alsa_output.platform-soc_sound.stereo-fallback"), "no speaker: HAT only"
+calls = os.path.join(TMP, "calls")
+open(fake, "w").write(f"#!/bin/sh\necho x >> {calls}\necho '[]'\n")
+assert audio.resolve_route(MAC, tries=3, delay=0) == (None, None)
+assert open(calls).read().count("x") == 3, "bounded: one dump per try"
+print("7. resolve_route: found first try, HAT-only without a MAC, bounded wait OK")
+
+# 8. recover_units: bluealsa's daemons, nothing under pipewire unless opted in
+audio._stack[0] = None
+os.environ["VIBB_AUDIO_STACK"] = "bluealsa"
+assert audio.recover_units() == ("bluealsa", "bluealsad")
+audio._stack[0] = None
+os.environ["VIBB_AUDIO_STACK"] = "pipewire"
+os.environ.pop("VIBB_BT_HEAL_RESTART_WP", None)
+assert audio.recover_units() == (), "WirePlumber re-registers by itself; never pipewire.service"
+os.environ["VIBB_BT_HEAL_RESTART_WP"] = "1"
+assert audio.recover_units() == ("wireplumber",)
+print("8. recover_units per stack OK")
+
 print("\nall audio_route_discovery checks passed")

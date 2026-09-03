@@ -110,6 +110,42 @@ def sink_ready(output, mac=None, dump=None):
     return find_local_sink(dump) is not None
 
 
+def resolve_route(mac, tries=10, delay=1.0):
+    """(bt_node | None, local_node | None) from the live graph. The BT
+    node is waited for — up to `tries` dumps `delay` apart — because
+    connect() calls this the moment the transport exists and the node
+    follows by milliseconds; the HAT node is whatever the same dump
+    shows (absent = no HAT / WirePlumber not up)."""
+    import time
+    bt_node = local_node = None
+    for i in range(max(1, tries)):
+        dump = pw_dump()
+        local_node = find_local_sink(dump) or local_node
+        if mac:
+            bt_node = find_bt_sink(mac, dump)
+            if bt_node:
+                break
+        else:
+            break
+        if i + 1 < tries:
+            time.sleep(delay)
+    return bt_node, local_node
+
+
+def recover_units():
+    """Units bt.py's crash recovery try-restarts after re-attaching the
+    firmware. bluealsa must come back for its A2DP endpoint; WirePlumber
+    re-registers its own on org.bluez's NameOwnerChanged (bench B10
+    verifies), so under pipewire the answer is nothing — restarting
+    pipewire.service would kill every client stream, and a WirePlumber
+    bounce is opt-in until the bench says a tier needs it."""
+    if stack() != "pipewire":
+        return ("bluealsa", "bluealsad")   # name differs across releases
+    if os.environ.get("VIBB_BT_HEAL_RESTART_WP") == "1":
+        return ("wireplumber",)
+    return ()
+
+
 def asound_text(mac, bt_node, local_node):
     """/etc/asound.conf under pipewire: the same two pcm NAMES the whole
     box addresses (output.py OUTPUT_PCMS), each pinned to a discovered
