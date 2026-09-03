@@ -9,7 +9,12 @@ only the python parent, and the orphaned mpv kept the bluealsa PCM held
 is layered: player._stop arms an 8s SIGKILL for mpv (so the bookmark
 still flushes), and _stop_child SIGKILLs the whole process group as the
 backstop for a wedged python parent. This gate exercises the backstop
-with REAL processes on a short timescale."""
+with REAL processes on a short timescale.
+Under the PipeWire stack this matters MORE, not less (NEW-7): bluealsa's
+exclusive pcm made an orphan mpv block silently; PipeWire mixes, so an
+orphan on a live sink keeps PLAYING under the next spawn and holds the
+node out of suspend (no transport release, no battery saving).
+"""
 import os
 import signal
 import subprocess

@@ -5,7 +5,12 @@ the audio-critical flags must NEVER be dropped by a future trim:
 --audio-samplerate=44100 / --audio-channels=stereo force the 44.1kHz stereo
 resample without which low-bitrate audiobooks play SILENTLY over A2DP
 (player.py's own comment records the field bug). This gate makes that
-regression impossible to land silently."""
+regression impossible to land silently.
+--audio-buffer=0.5 under PipeWire (plan §I): its CLIENT-side job survives —
+the decoder runs half a second ahead of the sink through pipewire-alsa's
+ring — but the graph->radio hop is governed by the quantum and the bluez5
+node latency, tuned in the WirePlumber fragment, not here.
+"""
 import os
 import sys
 import tempfile
