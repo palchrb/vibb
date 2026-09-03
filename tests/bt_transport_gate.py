@@ -18,6 +18,9 @@ SetConfiguration". Pinned here:
      its direction, then its duration when it ends — the 1/s /status
      readers must not double the bus traffic (daemon.py:2998 history)
   4. VIBB_BT_GATE=transport answers with the transport alone
+  4b. under the PipeWire stack the transport answers whatever the mode
+     says (there is no org.bluealsa to shadow) — code-level, because
+     play.sh/ssh invocations of bt.py carry no unit environment
   5. (rig only) against fake_bluezd over a private bus: SetPcm creates a
      source transport (parity fixtures keep meaning "ready"), a sink-only
      transport is False, DropTransport flips it back
@@ -124,6 +127,15 @@ tr["v"] = False
 assert btbus.a2dp_pcm_present(JR) is False
 btbus.GATE_MODE = "shadow"
 print("4. VIBB_BT_GATE=transport: the transport is the answer OK")
+
+# 4b. the stack decides, not the env
+btbus._pipewire = lambda: True
+pcm["v"], tr["v"] = False, True
+assert btbus.a2dp_pcm_present(JR) is True, "pipewire stack: transport answers in shadow mode"
+btbus._pipewire = lambda: False
+btbus._shadow["at"] = 0.0
+assert btbus.a2dp_pcm_present(JR) is False, "bluealsa stack: the PCM answers"
+print("4b. the PipeWire stack forces the transport gate OK")
 
 # 5. the live half, on the rig: fake_bluezd over a private bus
 probe = subprocess.run([sys.executable, "-c", "import dbus, gi"],

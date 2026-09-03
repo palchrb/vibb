@@ -388,13 +388,24 @@ def _map_pair_error(name, msg):
 # on a connect, which is exactly what shadow mode measures before the flip.
 GATE_MODE = os.environ.get("VIBB_BT_GATE", "shadow")
 A2DP_SOURCE_UUID = "0000110a-0000-1000-8000-00805f9b34fb"
-SHADOW_S = 10.0
+# btwatchd polls the gate 1/s for <=10s per connect: there a 1s cadence
+# sees the <3s transport flicker AM-12(c) asks about; the daemon keeps 10
+SHADOW_S = float(os.environ.get("VIBB_BT_GATE_SHADOW_S", "10"))
 _shadow = {"at": 0.0, "since": None, "dir": None}
+
+
+def _pipewire():
+    """Under the PipeWire stack there is no org.bluealsa at all — the
+    transport is the only gate, whatever VIBB_BT_GATE says. Code-level,
+    not unit-env-level: play.sh and ssh invocations of bt.py carry no
+    unit environment."""
+    from vibb import audio  # lazy: keeps the cli path import-light
+    return audio.stack() == "pipewire"
 
 
 def a2dp_pcm_present(mac):
     """The real 'audio ready' signal: the A2DP transport to `mac` exists."""
-    if GATE_MODE == "transport":
+    if GATE_MODE == "transport" or _pipewire():
         return a2dp_transport_present(mac)
     if backend() == "dbus":
         try:
