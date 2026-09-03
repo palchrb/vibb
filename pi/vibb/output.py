@@ -173,9 +173,20 @@ def _retarget_go_librespot(pcm):
 
 def audio_ready():
     """Is the active output able to make sound right now? BT speakers
-    drop out and reconnect; nobody should play into a void."""
+    drop out and reconnect; nobody should play into a void.
+
+    Under the PipeWire stack 'able' also means the SINK NODE exists: a
+    pcm pinned to an absent node fails at hw_params (bench 2026-09-03),
+    the BT transport precedes its node by milliseconds, and the HAT node
+    only exists once WirePlumber is up — the first tap after a reboot can
+    beat it (NEW-3). Answering False there keeps the crash healer from
+    burning its per-boot budget on 'server not up yet'."""
+    from vibb import audio as _audio
+    pipewire = _audio.stack() == "pipewire"
     if current_output()["output"] == "local":
-        return _i2s_card_present()
+        if not _i2s_card_present():
+            return False
+        return not pipewire or _audio.sink_ready("local")
     from vibb import bt as _bt, btbus
     try:
         mac = open(_bt.MAC_FILE).read().strip()
@@ -183,4 +194,6 @@ def audio_ready():
         return True  # no speaker configured — nothing to wait for
     if not mac:
         return True
-    return btbus.a2dp_pcm_present(mac)
+    if not btbus.a2dp_pcm_present(mac):
+        return False
+    return not pipewire or _audio.sink_ready("bt", mac)

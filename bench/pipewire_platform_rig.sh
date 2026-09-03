@@ -610,6 +610,9 @@ cmd_trixie_bootstrap() {
     say "stopping + masking the HOST session PipeWire of '$u' (it owns the cards + BT endpoint)"
     user_ctl "$u" stop wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null
     user_ctl "$u" mask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && ok "masked ('trixie-clean' unmasks)"
+    bad "HOST AUDIO IS OFF until 'trixie-clean' — a mask survives reboots. On Bookworm"
+    note "every client (RetroPie, ALSA 'default') goes through this PipeWire, so"
+    note "the whole desktop is silent while the container owns the cards."
   fi
   note "next: $0 trixie-shell"
 }

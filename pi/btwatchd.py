@@ -438,6 +438,14 @@ class Reconnector:
         try:
             from vibb import btbus
             ready = btbus.a2dp_pcm_present(self.target)
+            if ready:
+                from vibb import audio
+                if audio.stack() == "pipewire":
+                    # the transport precedes its sink node by ms, and a
+                    # pcm pinned to an absent node fails at hw_params —
+                    # the announce retargets mpv onto that pcm, so wait
+                    # for the node too (PLAN-pipewire-soloist §D)
+                    ready = audio.sink_ready("bt", self.target)
         except Exception:
             ready = True  # can't tell — announce rather than stall
         if ready:
