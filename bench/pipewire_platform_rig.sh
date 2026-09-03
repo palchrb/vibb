@@ -25,6 +25,19 @@
 #   ./pipewire_platform_rig.sh clean     # remove everything, unmask the
 #                                        # session PipeWire
 #
+# No Trixie to flash? Run the REAL 1.4/0.5 binaries in a Trixie
+# container on the Bookworm Pi, borrowing the host's cards, BlueZ and
+# D-Bus (host, as root):
+#   ./pipewire_platform_rig.sh trixie-bootstrap   # mmdebstrap trixie -> /srv/vibb-trixie (~5 min),
+#                                                 # stops+masks the host session PipeWire
+#   ./pipewire_platform_rig.sh trixie-shell       # nspawn shell inside; then IN the container:
+#       ./pipewire_platform_rig.sh check; ./pipewire_platform_rig.sh install
+#       ./pipewire_platform_rig.sh start; ./pipewire_platform_rig.sh test
+#   ./pipewire_platform_rig.sh trixie-clean       # kill the container daemons, unmask the host
+#   Inside the container the rig runs in VIBB_RIG_MODE=procs: config +
+#   daemons as plain processes, no units — so S3c (crash survival) is
+#   SKIPPED there; AM-1/AM-2 are systemd facts, verify them on a flash.
+#
 # Knobs (env):
 #   WP_ROLES=a2dp_sink       bluez5.roles value under test. The plan
 #                            wrote a2dp_source (host-centric guess);
@@ -40,6 +53,8 @@
 #   SOLOIST=/path/to/soloist       for s7.
 set -u
 
+MODE="${VIBB_RIG_MODE:-units}"     # units (a real Trixie) | procs (inside the container)
+CT=/srv/vibb-trixie
 PW_USER=pipewire
 RUN=/run/pipewire
 SOCK="$RUN/pipewire-0"
@@ -119,7 +134,7 @@ cmd_check() {
     note "s7's fail-closed verdict is only real with it stopped/absent."
   fi
   say "the session PipeWire (must be OFF for every test below)"
-  local u; u=$(desk_user)
+  local u; u=$(desk_user); [ "$MODE" = procs ] && { u=""; note "container mode — the HOST's session PipeWire was masked by trixie-bootstrap"; }
   if [ -n "$u" ] && user_ctl "$u" is-active pipewire.service >/dev/null 2>&1; then
     bad "user '$u' runs a session PipeWire — it owns the cards and BT"
     note "'install' stops+masks it for you; 'clean' unmasks."
@@ -146,17 +161,20 @@ cmd_check() {
 cmd_install() {
   need_root
   local u; u=$(desk_user)
+  if [ "$MODE" = procs ]; then u=""; note "procs mode: no session PipeWire to mask, no units to write"; fi
   if [ -n "$u" ]; then
     say "stopping + masking the session PipeWire of '$u'"
     user_ctl "$u" stop wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null
     user_ctl "$u" mask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && ok "masked"
   fi
   say "user + dirs"
+  getent group bluetooth >/dev/null || groupadd -r bluetooth   # bluez creates it on the box; a bare container has none
   id "$PW_USER" >/dev/null 2>&1 || useradd -r -M -d "$STATE/pipewire" -s /usr/sbin/nologin -g audio -G bluetooth "$PW_USER"
   mkdir -p "$STATE/pipewire" "$STATE/wireplumber" /etc/vibb/wp-empty-config
   chown -R "$PW_USER:audio" "$STATE/pipewire" "$STATE/wireplumber"
   ok "user $PW_USER (groups: $(id -Gn "$PW_USER"))"
 
+  if [ "$MODE" = units ]; then
   say "units (plan §A with AM-1: no RuntimeDirectory on the service; AM-2: wireplumber bound to pipewire)"
   cat > /etc/systemd/system/pipewire.socket <<EOF
 [Unit]
@@ -215,6 +233,7 @@ RestartSec=2
 WantedBy=pipewire.service
 EOF
   ok "wrote pipewire.socket pipewire.service wireplumber.service"
+  fi
 
   say "config fragments (plan §B, AM-17 hw-volume=true, roles=$WP_ROLES)"
   mkdir -p /etc/pipewire/pipewire.conf.d /etc/pipewire/client.conf.d /etc/wireplumber/wireplumber.conf.d
@@ -317,18 +336,34 @@ pcm.vibb_bench {
 }
 EOF
   ok "wrote pipewire/client/wireplumber fragments + /etc/alsa/conf.d/99-vibb-bench.conf"
-  systemctl daemon-reload
+  [ "$MODE" = units ] && systemctl daemon-reload
   note "next: $0 start"
 }
 
 cmd_start() {
   need_root
+  if [ "$MODE" = procs ]; then
+    say "starting pipewire + wireplumber as processes (container mode, root, same env as the units)"
+    pkill -x wireplumber 2>/dev/null; pkill -x pipewire 2>/dev/null; sleep 1
+    mkdir -p "$RUN" && chown "$PW_USER:audio" "$RUN" && chmod 0750 "$RUN"
+    PIPEWIRE_CONFIG_DIR=/etc/pipewire HOME="$STATE/pipewire" \
+      setsid pipewire >/tmp/pipewire.log 2>&1 < /dev/null &
+    for _ in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 0.5; done
+    [ -S "$SOCK" ] && ok "$SOCK up" || { bad "$SOCK never appeared:"; tail -20 /tmp/pipewire.log | sed 's/^/       /'; return 1; }
+    chmod 0660 "$SOCK"; chown "$PW_USER:audio" "$SOCK"
+    XDG_STATE_HOME="$STATE/wireplumber" XDG_CONFIG_HOME=/etc/vibb/wp-empty-config HOME="$STATE/wireplumber" \
+      setsid wireplumber >/tmp/wireplumber.log 2>&1 < /dev/null &
+    sleep 3
+    pgrep -x wireplumber >/dev/null && ok "wireplumber running (log: /tmp/wireplumber.log)" || { bad "wireplumber died:"; tail -30 /tmp/wireplumber.log | sed 's/^/       /'; }
+    grep -iE "error|fail" /tmp/wireplumber.log | head -5 | sed 's/^/       wp: /'
+  else
   say "starting system-mode PipeWire"
   systemctl enable --now pipewire.socket pipewire.service wireplumber.service 2>&1 | sed 's/^/       /'
   for _ in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 0.5; done
   [ -S "$SOCK" ] && ok "$SOCK up" || { bad "$SOCK never appeared"; journalctl -u pipewire -n 20 --no-pager | sed 's/^/       /'; return 1; }
   sleep 2
   systemctl is-active wireplumber.service >/dev/null && ok "wireplumber active" || { bad "wireplumber not active:"; journalctl -u wireplumber -n 30 --no-pager | sed 's/^/       /'; }
+  fi
   say "graph"
   # wpctl can block forever when the session manager never publishes its
   # metadata (seen on a 0.4 bench) — never let a status print hang the rig
@@ -434,11 +469,15 @@ cmd_test() {
 
   # ===================== S3c: crash survival (AM-1 / AM-2) =====================
   say "S3c: kill -9 pipewire — socket path must survive, wireplumber must come back"
+  if [ "$MODE" = procs ]; then
+    note "SKIPPED in container mode (no units) — AM-1/AM-2 are systemd facts; verify on a Trixie flash"; verdict SKIPPED s3c_crash
+  else
   kill -9 "$(pidof pipewire)" 2>/dev/null; sleep 5
   if [ -S "$SOCK" ] && systemctl is-active pipewire.service >/dev/null && systemctl is-active wireplumber.service >/dev/null && pw-dump >/dev/null 2>&1; then
     ok "socket present, pipewire + wireplumber active, pw-dump works after the crash"; verdict PASS s3c_crash
   else bad "after kill -9: sock=$([ -S "$SOCK" ] && echo yes || echo NO) pipewire=$(systemctl is-active pipewire.service) wireplumber=$(systemctl is-active wireplumber.service)"; verdict KILL s3c_crash; fi
   sleep 1
+  fi
 
   # ===================== S5: node names + prop keys =====================
   say "S5: Audio/Sink nodes and the prop keys the resolver will read"
@@ -522,19 +561,70 @@ cmd_s7() {
 cmd_clean() {
   need_root
   say "removing the system-mode PipeWire and restoring the session one"
+  if [ "$MODE" = procs ]; then pkill -x wireplumber 2>/dev/null; pkill -x pipewire 2>/dev/null; rm -rf "$RUN"
+  else
   systemctl disable --now wireplumber.service pipewire.service pipewire.socket 2>/dev/null
   rm -f /etc/systemd/system/pipewire.socket /etc/systemd/system/pipewire.service /etc/systemd/system/wireplumber.service
+  fi
   rm -f /etc/pipewire/pipewire.conf.d/10-vibb.conf /etc/pipewire/client.conf.d/10-vibb.conf
   rm -f /etc/wireplumber/wireplumber.conf.d/50-vibb.conf /etc/wireplumber/wireplumber.conf.d/51-vibb-hooks.conf
   rm -f /etc/alsa/conf.d/99-vibb-bench.conf
-  systemctl daemon-reload
-  local u; u=$(desk_user)
+  [ "$MODE" = units ] && systemctl daemon-reload
+  local u; u=$(desk_user); [ "$MODE" = procs ] && u=""
   [ -n "$u" ] && user_ctl "$u" unmask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && note "session PipeWire of '$u' unmasked (start it: systemctl --user start pipewire wireplumber)"
   note "left in place: user '$PW_USER', $STATE/{pipewire,wireplumber} (harmless)"
   ok "clean"
 }
 
+# --------------------------- Trixie container (host side) ---------------------------
+cmd_trixie_bootstrap() {
+  need_root
+  say "Trixie userspace at $CT via mmdebstrap (the REAL 1.4/0.5 binaries on a Bookworm host)"
+  command -v mmdebstrap >/dev/null 2>&1 && command -v systemd-nspawn >/dev/null 2>&1 \
+    || { note "installing mmdebstrap + systemd-container"; apt-get install -y --no-install-recommends mmdebstrap systemd-container >/dev/null || { bad "apt failed"; return 1; }; }
+  if [ -x "$CT/usr/bin/wireplumber" ]; then ok "$CT already bootstrapped"
+  else
+    mmdebstrap --variant=apt --architectures="$(dpkg --print-architecture)" \
+      --include=pipewire,pipewire-bin,pipewire-alsa,wireplumber,libspa-0.2-bluetooth,alsa-utils,jq,dbus,procps,psmisc,sudo,ca-certificates,curl \
+      trixie "$CT" http://deb.debian.org/debian 2>&1 | tail -5 | sed 's/^/       /'
+    [ -x "$CT/usr/bin/wireplumber" ] && ok "bootstrapped" || { bad "bootstrap failed"; return 1; }
+  fi
+  mkdir -p "$CT/rig" && cp "$0" "$CT/rig/" && chmod +x "$CT/rig/$(basename "$0")" && ok "rig copied to $CT/rig/"
+  chroot "$CT" /usr/sbin/groupadd -r bluetooth 2>/dev/null
+  chroot "$CT" /usr/sbin/useradd -r -M -s /usr/sbin/nologin -g audio -G bluetooth "$PW_USER" 2>/dev/null; true
+  local u; u=$(desk_user)
+  if [ -n "$u" ]; then
+    say "stopping + masking the HOST session PipeWire of '$u' (it owns the cards + BT endpoint)"
+    user_ctl "$u" stop wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null
+    user_ctl "$u" mask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && ok "masked ('trixie-clean' unmasks)"
+  fi
+  note "next: $0 trixie-shell"
+}
+
+cmd_trixie_shell() {
+  need_root
+  [ -x "$CT/usr/bin/wireplumber" ] || { bad "no container at $CT — run trixie-bootstrap"; return 1; }
+  say "entering $CT (host /dev/snd, /run/udev, system D-Bus bound in; VIBB_RIG_MODE=procs)"
+  note "inside:  cd /rig && ./$(basename "$0") check && ./$(basename "$0") install && ./$(basename "$0") start && ./$(basename "$0") test"
+  exec systemd-nspawn -D "$CT" --machine=vibb-trixie --resolv-conf=copy-host \
+    --bind=/dev/snd --bind-ro=/run/udev --bind=/run/dbus/system_bus_socket \
+    --property=DeviceAllow="char-alsa rwm" --capability=CAP_SYS_NICE,CAP_SYS_RESOURCE \
+    --setenv=VIBB_RIG_MODE=procs --chdir=/rig -- /bin/bash
+}
+
+cmd_trixie_clean() {
+  need_root
+  pkill -x wireplumber 2>/dev/null; pkill -x pipewire 2>/dev/null
+  machinectl terminate vibb-trixie 2>/dev/null
+  local u; u=$(desk_user)
+  [ -n "$u" ] && user_ctl "$u" unmask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && note "host session PipeWire unmasked (systemctl --user start pipewire wireplumber)"
+  ok "container daemons stopped; $CT kept (rm -rf it yourself if you want the space back)"
+}
+
 case "${1:-check}" in
+  trixie-bootstrap) cmd_trixie_bootstrap ;;
+  trixie-shell)     cmd_trixie_shell ;;
+  trixie-clean)     cmd_trixie_clean ;;
   check)   cmd_check ;;
   install) cmd_install ;;
   start)   cmd_start ;;
@@ -542,5 +632,5 @@ case "${1:-check}" in
   s6)      cmd_s6 ;;
   s7)      cmd_s7 ;;
   clean)   cmd_clean ;;
-  *) echo "usage: $0 {check|install|start|test|s6|s7|clean}"; exit 2 ;;
+  *) echo "usage: $0 {check|install|start|test|s6|s7|clean|trixie-bootstrap|trixie-shell|trixie-clean}"; exit 2 ;;
 esac
