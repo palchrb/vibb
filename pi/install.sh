@@ -55,30 +55,6 @@ while [[ $# -gt 0 ]]; do
 done
 export VIBB_AUDIO_STACK="${VIBB_AUDIO_STACK:-}" VIBB_SPOTIFY_ENGINE="${VIBB_SPOTIFY_ENGINE:-}"
 
-# The Spotify engine is an INSTALL-TIME toggle like the audio stack
-# (PLAN-soloistd.md): one engine is provisioned, and the daemon's ~30
-# REST call sites are engine-blind through VIBB_GO_API while every
-# systemctl call goes through paths.go_unit_cmd()/VIBB_GO_UNIT. Resolved
-# FIRST so an engine we cannot provision refuses before anything is
-# touched, not halfway through.
-SPOTIFY_ENGINE="$VIBB_SPOTIFY_ENGINE"
-if [[ -z $SPOTIFY_ENGINE && -r /etc/vibb/spotify-engine ]]; then
-  SPOTIFY_ENGINE="$(tr -d '[:space:]' < /etc/vibb/spotify-engine)"
-fi
-SPOTIFY_ENGINE="${SPOTIFY_ENGINE:-golibrespot}"
-case "$SPOTIFY_ENGINE" in
-  golibrespot) ;;
-  soloist)
-    echo "install.sh: --soloist is not available yet." >&2
-    echo "  The soloistd sidecar (docs/PLAN-soloistd.md P1) is designed but" >&2
-    echo "  NOT built: nothing would provision or supervise the engine." >&2
-    echo "  It also requires --pipewire (Soloist has no ALSA backend) and a" >&2
-    echo "  personal Soloist API key from a Premium account." >&2
-    exit 2 ;;
-  *)
-    echo "install.sh: VIBB_SPOTIFY_ENGINE must be golibrespot or soloist" >&2
-    exit 2 ;;
-esac
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run with sudo: sudo $0" >&2
@@ -109,6 +85,12 @@ RUN_USER="${SUDO_USER:-pi}"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 CONF_DIR="$RUN_HOME/.config/go-librespot"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The two install-time toggles (PLAN-pipewire-soloist.md): the audio
+# stack and the Spotify engine. The engine resolves FIRST and refuses
+# before anything is touched (soloist needs pipewire + the sidecar).
+. "$SCRIPT_DIR/audio-stack.sh"
+. "$SCRIPT_DIR/spotify-engine.sh"
+spotify_engine_resolve
 
 # --- helpers -----------------------------------------------------------------
 
@@ -176,10 +158,7 @@ PKGS=(bluez bluez-alsa-utils libasound2-plugin-bluez alsa-utils curl jq
 # Audio stack (PLAN-pipewire-soloist.md): bluealsa (default) or pipewire.
 # The toggle lives in audio-stack.sh; bluealsa's packages stay in PKGS on
 # BOTH stacks — masked, never removed, so an offline rollback always works.
-. "$SCRIPT_DIR/audio-stack.sh"
 audio_stack_resolve
-mkdir -p /etc/vibb && printf '%s\n' "$SPOTIFY_ENGINE" > /etc/vibb/spotify-engine
-echo "    spotify engine: $SPOTIFY_ENGINE (/etc/vibb/spotify-engine)"
 # shellcheck disable=SC2207
 PKGS+=($(audio_stack_packages))
 missing=()
@@ -703,6 +682,7 @@ Wants=bluetooth.service
 # Kill switch: systemctl edit vibb-bt-reconnect ->
 #   [Service] Environment=VIBB_BT_BACKEND=cli   (poll-loop fallback)
 $(audio_stack_unit_env)
+$(spotify_engine_unit_env)
 # the transport-gate shadow compare at 1/s here: _await_pcm polls 1/s for
 # <=10s per connect, so a <3s transport flicker is visible (AM-12c)
 Environment=VIBB_BT_GATE_SHADOW_S=1
@@ -1180,12 +1160,13 @@ install_if_changed 755 "$SCRIPT_DIR/idle.py"  /usr/local/bin/vibb-idle  && IDLE_
 # (idle_shutdown_min, 0 = never) is the actual on/off knob and idle.py
 # re-reads it live. Previously this service was opt-in via
 # 'vibb-power idle-on', which made the PWA setting a silent no-op.
-write_if_changed /etc/systemd/system/vibb-idle.service <<'EOF2' && IDLE_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-idle.service <<EOF2 && IDLE_CHANGED=1
 [Unit]
 Description=Vibb idle auto-shutdown
 After=vibb-daemon.service
 
 [Service]
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-idle
 Restart=always
 RestartSec=30
@@ -1195,6 +1176,9 @@ WantedBy=multi-user.target
 EOF2
 
 SONOS_CHANGED=$PKG_CHANGED
+# The Spotify engine: go-librespot (today) or the soloistd sidecar — and
+# the rollback between them. Recorded only after a successful apply.
+spotify_engine_apply
 install_if_changed 755 "$SCRIPT_DIR/sonosd.py" /usr/local/bin/vibb-sonos && SONOS_CHANGED=1
 write_if_changed /etc/systemd/system/vibb-sonos.service <<'EOF2' && SONOS_CHANGED=1
 [Unit]
@@ -1230,7 +1214,8 @@ Description=Vibb orchestration daemon (playback state + API)
 # (systemd-analyze rig 2026-07-18: multi-user waited on network-online).
 
 [Service]
-Environment=VIBB_GO_CONFIG=$CONF_DIR/config.yml
+$(spotify_engine_go_config_env "$CONF_DIR/config.yml")
+$(spotify_engine_unit_env)
 $(audio_stack_unit_env)
 ExecStart=/usr/bin/python3 /usr/local/bin/vibb-daemon
 Restart=always
@@ -1242,12 +1227,13 @@ EOF
 
 BTN_CHANGED=$PKG_CHANGED
 install_if_changed 755 "$SCRIPT_DIR/buttons.py" /usr/local/bin/vibb-buttons && BTN_CHANGED=1
-write_if_changed /etc/systemd/system/vibb-buttons.service <<'EOF' && BTN_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-buttons.service <<EOF && BTN_CHANGED=1
 [Unit]
 Description=Vibb media button daemon (AVRCP etc.)
 After=bluetooth.service
 
 [Service]
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-buttons
 Restart=always
 RestartSec=10
@@ -1258,13 +1244,14 @@ EOF
 
 # RFID daemon service (PN532). Installed but NOT enabled — enable it when
 # the reader is wired:  sudo systemctl enable --now vibb-rfid
-write_if_changed /etc/systemd/system/vibb-rfid.service <<'EOF' && RFID_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-rfid.service <<EOF && RFID_CHANGED=1
 [Unit]
 Description=Vibb RFID daemon
-After=go-librespot.service
+After=$(spotify_engine_unit).service
 
 [Service]
 EnvironmentFile=-/etc/vibb/rfid.conf
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-rfid
 Restart=always
 RestartSec=10

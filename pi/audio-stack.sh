@@ -2,6 +2,7 @@
 # The audio-stack toggle for install.sh (PLAN-pipewire-soloist.md §H).
 # Sourced, never run: install.sh calls the functions below in order.
 #
+#   audio_stack_peek       the same resolution, read-only (no file written)
 #   audio_stack_resolve    VIBB_AUDIO_STACK env > /etc/vibb/audio-stack > bluealsa
 #   audio_stack_packages   the apt packages the chosen stack adds
 #   audio_stack_apply      pipewire: user, dirs, the three system units, the
@@ -44,6 +45,16 @@ WP_ROLES="${WP_ROLES:-a2dp_sink}"
 WP_PROFILE="${WP_PROFILE:-main-embedded}"
 
 _as_say() { echo "    audio stack: $*"; }
+
+audio_stack_peek() {
+  # the same resolution as audio_stack_resolve, WITHOUT the write — for
+  # decisions that must refuse before anything is touched (the engine toggle)
+  local want="${VIBB_AUDIO_STACK:-}"
+  if [[ -z $want && -r $_AS_STACK_FILE ]]; then
+    want="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
+  fi
+  [[ $want == pipewire ]] && echo pipewire || echo bluealsa
+}
 
 audio_stack_resolve() {
   local want="${VIBB_AUDIO_STACK:-}"

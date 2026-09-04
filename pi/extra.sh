@@ -38,7 +38,14 @@ HANDOFF="vibb-idle vibb-buttons vibb-ui"
 # a script may stop bluetooth/bluealsa to use the radio itself, and the
 # box must still come back whole. Anything OUTSIDE this set that a
 # script stops is the script's own business.
-RESTORE="bluetooth bluealsa go-librespot vibb-daemon vibb-mpris
+# The Spotify engine's unit comes from the same file install.sh writes
+# (go-librespot, or vibb-soloistd under --soloist) — never a literal, or
+# --run would leave the other engine's child alive with a destroyed
+# stream and never restart it (QA 2026-09-04).
+ENGINE_UNIT=go-librespot
+[ "$(cat "${VIBB_SPOTIFY_ENGINE_FILE:-/etc/vibb/spotify-engine}" 2>/dev/null)" = soloist ] \
+  && ENGINE_UNIT=vibb-soloistd
+RESTORE="bluetooth bluealsa $ENGINE_UNIT vibb-daemon vibb-mpris
          vibb-bt-reconnect vibb-buttons vibb-idle vibb-ui"
 # Under the PipeWire stack the audio server owns the HAT (PLAN-pipewire-
 # soloist §H): --run stops it so an extra gets the raw hw: device, and
@@ -77,7 +84,7 @@ case "${1:-}" in
     curl -s -m 5 -X POST -H 'Content-Type: application/json' \
          -d '{"keep":true}' "$API/stop" >/dev/null 2>&1 || true
     $SYSTEMCTL stop $HANDOFF
-    $SYSTEMCTL stop go-librespot 2>/dev/null || true  # frees I2S/ALSA
+    $SYSTEMCTL stop "$ENGINE_UNIT" 2>/dev/null || true  # frees I2S/ALSA
     if [ "$AUDIO_STACK" = pipewire ]; then
       # the server holds the HAT; stop it (reverse order) and open ALSA
       # 'default' — closed for everyone else (AM-15) — onto the HAT for
@@ -129,7 +136,7 @@ case "${1:-}" in
              vibb-mpris vibb-bt-reconnect $AUDIO_UNITS bluetooth bluealsa; do
       $SYSTEMCTL start "$u" 2>/dev/null || true
     done
-    $SYSTEMCTL start --no-block go-librespot 2>/dev/null || true
+    $SYSTEMCTL start --no-block "$ENGINE_UNIT" 2>/dev/null || true
     # re-park the CPU to whatever mode --run found (battery default)
     prev="$(cat "$GOV_STATE" 2>/dev/null || echo powersave)"
     for g in "$CPUS"/cpu*/cpufreq/scaling_governor; do

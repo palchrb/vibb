@@ -65,9 +65,27 @@ print("4. endpoint-owner ordering + unit env on daemon/go-librespot/bt-reconnect
 assert "Environment=VIBB_BT_GATE_SHADOW_S=1" in rc_unit
 print("5. bt-reconnect shadow cadence 1/s OK")
 
+# 7. the ENGINE toggle wiring (AM-53)
+i_eng = src.index("\nspotify_engine_resolve\n")
+assert i_eng < i_loop, "engine resolve (and refuse) before anything is touched"
+i_app = src.index("\nspotify_engine_apply\n")
+assert i_pkg < i_app < src.index('echo "==> [6/8] Enabling services'), \
+    "engine apply after the package install, before the services enable"
+for marker in ("Description=Vibb orchestration daemon", "Description=Vibb BT reconnect daemon",
+               "Description=Vibb idle auto-shutdown", "Description=Vibb media button daemon",
+               "Description=Vibb RFID daemon"):
+    i = src.index(marker)
+    assert "$(spotify_engine_unit_env)" in src[i:i + 2500], f"{marker}: engine env"
+assert "$(spotify_engine_go_config_env" in src and "Environment=VIBB_GO_CONFIG=" not in src, \
+    "GO_CONFIG only through the conditional helper (none under soloist)"
+print("7. engine toggle: resolve early, apply late, env on five units, GO_CONFIG conditional OK")
+
 # the toggle file itself is what install.sh reads at runtime for extras
-assert 'AUDIO_STACK="$(cat "${VIBB_AUDIO_STACK_FILE:-/etc/vibb/audio-stack}"' in \
-    open(os.path.join(REPO, "pi", "extra.sh"), encoding="utf-8").read()
-print("6. extra.sh reads the same stack file OK")
+extra = open(os.path.join(REPO, "pi", "extra.sh"), encoding="utf-8").read()
+assert 'AUDIO_STACK="$(cat "${VIBB_AUDIO_STACK_FILE:-/etc/vibb/audio-stack}"' in extra
+assert "VIBB_SPOTIFY_ENGINE_FILE:-/etc/vibb/spotify-engine" in extra and \
+    "stop go-librespot" not in extra and "start --no-block go-librespot" not in extra, \
+    "extra.sh derives the engine unit, never names it"
+print("6. extra.sh reads the same stack + engine files OK")
 
 print("\nall install_unit_order checks passed")

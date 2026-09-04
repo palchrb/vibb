@@ -251,4 +251,21 @@ assert "pipewire" not in started and "wireplumber" not in started
 print("7. pipewire stack: --run frees the server + opens default for the extra; "
       "--restore brings the trio back; bluealsa untouched OK")
 
+# 8. the engine file says soloist: --run stops vibb-soloistd (never
+#    go-librespot, which is masked), --restore starts it back
+eng_file = os.path.join(TMP, "spotify-engine")
+open(eng_file, "w").write("soloist\n")
+env_so = dict(env, VIBB_SPOTIFY_ENGINE_FILE=eng_file)
+os.unlink(LOG)
+r = subprocess.run(["bash", WRAPPER, "--run", script], env=env_so,
+                   capture_output=True, text=True, timeout=30)
+assert r.returncode == 0, r.stderr
+before_script = open(MARK).read()
+assert "stop vibb-soloistd" in before_script and "stop go-librespot" not in before_script, before_script
+os.unlink(LOG)
+subprocess.run(["bash", WRAPPER, "--restore"], env=env_so, capture_output=True, text=True, timeout=30)
+started = [c.split()[-1] for c in open(LOG).read().splitlines() if c.startswith("start")]
+assert "vibb-soloistd" in started and "go-librespot" not in started, started
+print("8. engine file = soloist: --run/--restore use vibb-soloistd, never go-librespot OK")
+
 print("\nall extras_wrapper checks passed")

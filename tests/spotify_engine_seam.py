@@ -57,9 +57,9 @@ for root, _dirs, files in os.walk(os.path.join(REPO, "pi")):
         src = open(path, encoding="utf-8").read()
         if LITERAL.search(src) or re.search(r"systemctl [a-z-]+ go-librespot", src):
             hits.append(os.path.relpath(path, REPO))
-assert hits == ["pi/install.sh"], \
-    f"the engine unit is named outside install.sh (which owns the unit FILE): {hits}"
-print("2. only install.sh names the unit literally (it writes it) OK")
+assert sorted(hits) == ["pi/install.sh", "pi/spotify-engine.sh"], \
+    f"the engine unit is named outside the two files that own the unit FILES: {hits}"
+print("2. only install.sh + spotify-engine.sh name the unit literally (they write it) OK")
 
 # 3. the play_origin value survives — it is not a unit name
 spot = open(os.path.join(REPO, "pi/vibb/spotify.py"), encoding="utf-8").read()
@@ -75,14 +75,15 @@ SH = os.path.join(REPO, "pi", "install.sh")
 
 
 def run_flags(*args, engine_file=None):
-    """Parse-only: install.sh down to the end of the engine resolve, i.e.
-    everything the flags decide, and nothing that touches the system.
-    (Cut before RUN_USER: `getent passwd` there exits under set -e on a
-    box without that user, which has nothing to do with flag parsing.)"""
+    """Parse-only: install.sh down to the first section — the flags, both
+    toggles sourced, the engine resolve — nothing that touches the system.
+    SUDO_USER is the current user so RUN_HOME's getent succeeds under set -e."""
     tmp = tempfile.mkdtemp()
     src = open(SH, encoding="utf-8").read()
-    head = src[:src.index('RUN_USER="${SUDO_USER:-pi}"')]
-    head = head.replace("/etc/vibb/spotify-engine", f"{tmp}/etc/vibb/spotify-engine")
+    head = src[:src.index("# --- 1. packages")]
+    # stdin has no BASH_SOURCE: pin SCRIPT_DIR to the real pi/ dir
+    head = head.replace('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+                        f'SCRIPT_DIR={os.path.join(REPO, "pi")}')
     # EUID is read-only in bash: drop the root check, it is not under test
     head = re.sub(r"^if \[\[ \$EUID.*?^fi\n", "", head, flags=re.S | re.M)
     if engine_file:
@@ -90,7 +91,8 @@ def run_flags(*args, engine_file=None):
         open(f"{tmp}/etc/vibb/spotify-engine", "w").write(engine_file + "\n")
     script = head + '\necho "ENGINE=$SPOTIFY_ENGINE STACK=${VIBB_AUDIO_STACK:-} UPDATE=$UPDATE"\n'
     return subprocess.run(["bash", "-s", "--", *args], input=script, env=dict(
-        os.environ, VIBB_NAME="vibb", VIBB_AUDIO_STACK="", VIBB_SPOTIFY_ENGINE=""),
+        os.environ, VIBB_NAME="vibb", VIBB_AUDIO_STACK="", VIBB_SPOTIFY_ENGINE="",
+        VIBB_FS_ROOT=tmp, SUDO_USER=os.environ.get("USER") or "root"),
         capture_output=True, text=True, timeout=60)
 
 
@@ -105,10 +107,11 @@ print("4a. --librespot/--bluealsa/--pipewire/--update parse OK")
 
 r = run_flags("--soloist")
 assert r.returncode == 2, f"--soloist must refuse: rc={r.returncode}"
-assert "not available yet" in r.stderr and "PLAN-soloistd" in r.stderr \
-    and "--pipewire" in r.stderr and "API key" in r.stderr, r.stderr
+assert "PipeWire" in r.stderr and "--pipewire" in r.stderr, r.stderr
 assert "ENGINE=" not in r.stdout, "it must refuse BEFORE doing anything"
-print("4b. --soloist refuses early and says exactly what is missing OK")
+r = run_flags("--pipewire", "--soloist")
+assert r.returncode == 2 and "not built" in r.stderr and "PLAN-soloistd" in r.stderr, r.stderr
+print("4b. --soloist refuses early: needs --pipewire, then 'sidecar not built' OK")
 
 r = run_flags("--nonsense")
 assert r.returncode == 2 and "unknown option" in r.stderr, r.stderr
