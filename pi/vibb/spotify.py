@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from vibb.paths import STATE_DIR
+from vibb.paths import STATE_DIR, go_unit_cmd
 
 API = os.environ.get("VIBB_GO_API", "http://127.0.0.1:3678")
 CONFIG = os.environ.get("VIBB_GO_CONFIG", "")
@@ -81,7 +81,7 @@ def _conf_dir():
 
 def _ctl(verb):
     try:
-        subprocess.run(["systemctl", verb, "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd(verb), timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         pass
 

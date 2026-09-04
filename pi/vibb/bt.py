@@ -54,7 +54,7 @@ for _p in (_here, "/usr/local/lib/vibb-py"):
         break
 from vibb import btbus  # noqa: E402
 from vibb.btbus import _run, log  # noqa: E402 — shared helpers
-from vibb.paths import STATE_DIR, note_go_restart  # noqa: E402
+from vibb.paths import STATE_DIR, go_unit_cmd, note_go_restart  # noqa: E402
 
 MAC_FILE = os.environ.get("VIBB_BT_FILE", "/etc/vibb/bt-headset")
 # vibbd touches this when the user switches output to bt while the
@@ -521,7 +521,7 @@ def _route_alsa(mac):
         log("==> go-librespot output reopened live on the new headset")
         return
     log("==> restarting go-librespot to apply the new route...")
-    _run(["systemctl", "restart", "go-librespot"], timeout=30)
+    _run(go_unit_cmd("restart"), timeout=30)
     # tell the daemon's dead-device rebuild this reconnect already got a
     # fresh go-librespot — so it doesn't bounce it a second time
     note_go_restart()

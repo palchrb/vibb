@@ -17,7 +17,7 @@
 # doubles as an updater after git pull. Use --update to force re-downloading
 # go-librespot and upgrading the python libs.
 #
-# Usage:  sudo ./install.sh [--update]
+# Usage:  sudo ./install.sh [--update] [--bluealsa|--pipewire] [--librespot|--soloist]
 # After:  sudo ./play.sh connect
 #         sudo ./play.sh "https://open.spotify.com/track/..."
 
@@ -25,7 +25,60 @@ set -euo pipefail
 
 API_PORT=3678
 UPDATE=0
-[[ ${1:-} == "--update" ]] && UPDATE=1
+usage() {
+  cat <<'USAGE'
+usage: install.sh [--update] [--bluealsa|--pipewire] [--librespot|--soloist]
+
+  --update      re-install the python libs too (the slow path)
+  --bluealsa    audio stack: bare ALSA + bluealsa (default, today's box)
+  --pipewire    audio stack: PipeWire + WirePlumber, bluealsa masked
+                (rollback: re-run with --bluealsa)
+  --librespot   Spotify engine: the go-librespot fork (default)
+  --soloist     Spotify engine: Spotify's official headless client
+                (needs --pipewire; the soloistd sidecar is not built yet)
+
+Both toggles are also settable as VIBB_AUDIO_STACK / VIBB_SPOTIFY_ENGINE,
+and both are remembered in /etc/vibb/ so a bare re-run keeps your choice.
+USAGE
+}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --update)    UPDATE=1 ;;
+    --bluealsa)  VIBB_AUDIO_STACK=bluealsa ;;
+    --pipewire)  VIBB_AUDIO_STACK=pipewire ;;
+    --librespot) VIBB_SPOTIFY_ENGINE=golibrespot ;;
+    --soloist)   VIBB_SPOTIFY_ENGINE=soloist ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "install.sh: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+export VIBB_AUDIO_STACK="${VIBB_AUDIO_STACK:-}" VIBB_SPOTIFY_ENGINE="${VIBB_SPOTIFY_ENGINE:-}"
+
+# The Spotify engine is an INSTALL-TIME toggle like the audio stack
+# (PLAN-soloistd.md): one engine is provisioned, and the daemon's ~30
+# REST call sites are engine-blind through VIBB_GO_API while every
+# systemctl call goes through paths.go_unit_cmd()/VIBB_GO_UNIT. Resolved
+# FIRST so an engine we cannot provision refuses before anything is
+# touched, not halfway through.
+SPOTIFY_ENGINE="$VIBB_SPOTIFY_ENGINE"
+if [[ -z $SPOTIFY_ENGINE && -r /etc/vibb/spotify-engine ]]; then
+  SPOTIFY_ENGINE="$(tr -d '[:space:]' < /etc/vibb/spotify-engine)"
+fi
+SPOTIFY_ENGINE="${SPOTIFY_ENGINE:-golibrespot}"
+case "$SPOTIFY_ENGINE" in
+  golibrespot) ;;
+  soloist)
+    echo "install.sh: --soloist is not available yet." >&2
+    echo "  The soloistd sidecar (docs/PLAN-soloistd.md P1) is designed but" >&2
+    echo "  NOT built: nothing would provision or supervise the engine." >&2
+    echo "  It also requires --pipewire (Soloist has no ALSA backend) and a" >&2
+    echo "  personal Soloist API key from a Premium account." >&2
+    exit 2 ;;
+  *)
+    echo "install.sh: VIBB_SPOTIFY_ENGINE must be golibrespot or soloist" >&2
+    exit 2 ;;
+esac
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run with sudo: sudo $0" >&2
@@ -125,6 +178,8 @@ PKGS=(bluez bluez-alsa-utils libasound2-plugin-bluez alsa-utils curl jq
 # BOTH stacks — masked, never removed, so an offline rollback always works.
 . "$SCRIPT_DIR/audio-stack.sh"
 audio_stack_resolve
+mkdir -p /etc/vibb && printf '%s\n' "$SPOTIFY_ENGINE" > /etc/vibb/spotify-engine
+echo "    spotify engine: $SPOTIFY_ENGINE (/etc/vibb/spotify-engine)"
 # shellcheck disable=SC2207
 PKGS+=($(audio_stack_packages))
 missing=()

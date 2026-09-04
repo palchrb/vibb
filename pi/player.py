@@ -49,7 +49,8 @@ for _p in (_HERE, "/usr/local/lib/vibb-py"):
         break
 from vibb import content, mpv as _mpv, radio, spotify  # noqa: E402
 from vibb.output import OUTPUT_PCMS, audio_ready, local_volume  # noqa: E402
-from vibb.paths import STATE_DIR, note_go_restart, read_settings  # noqa: E402
+from vibb.paths import (STATE_DIR, go_unit_cmd, note_go_restart,  # noqa: E402
+                        read_settings)
 
 is_spotify = spotify.is_spotify
 POLL_S = 3
@@ -415,8 +416,7 @@ def _confirm_spotify_paused(budget_s=PAUSE_CONFIRM_S):
     log(f"spotify pause unconfirmed after {budget_s:.1f}s (API timing out: "
         "wedged) — restarting go-librespot")
     try:
-        subprocess.run(["systemctl", "--no-block", "try-restart",
-                        "go-librespot"], timeout=10)
+        subprocess.run(go_unit_cmd("--no-block", "try-restart"), timeout=10)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r})")
     note_go_restart()   # the daemon's blip rebuild must not bounce it again

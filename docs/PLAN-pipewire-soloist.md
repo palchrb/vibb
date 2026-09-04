@@ -243,6 +243,30 @@ I10 `audio_policy_selftest` + `audio_policy_daemon`, I11
 - the 7-day baseline on the production box (QA §4) before any cutover
   there; the spare Zero needs no baseline.
 
+## Toward `--soloist` (Phase 3) — the sequence, 2026-09-04
+
+The engine toggle has the same shape as the audio-stack toggle, and the
+plan's premise (PLAN-soloistd.md decision 1) was that the daemon is
+already engine-blind. Half true: the REST half was (`VIBB_GO_API`, the
+dialect-preserving sidecar), the UNIT-NAME half was not — `go-librespot`
+sat hardcoded in 14 systemctl calls across five files, so a swap would
+have restarted the wrong process. Done now, in this order:
+
+| Step | State | What it is |
+|---|---|---|
+| 1 | **done** | `paths.go_unit_cmd()` / `VIBB_GO_UNIT`: every systemctl call on the engine goes through one builder. `spotify_engine_seam.py` pins that no literal is left and that the play_origin VALUE `"go-librespot"` (the phone-clobber guard, not a unit) survived. |
+| 2 | **done** | `install.sh --librespot|--soloist` (and `--bluealsa|--pipewire`, `--help`); the choice is remembered in `/etc/vibb/spotify-engine`. `--soloist` refuses EARLY, before anything is touched, and says what is missing. |
+| 3 | owed | `pi/spotify-engine.sh`, the twin of `audio-stack.sh`: refuse soloist unless the stack is pipewire; install the binary (stable-latest archive, exec-sanity, no pinning — PLAN-soloistd lifecycle); write `vibb-soloistd.service` as `$RUN_USER`; mask `go-librespot`; put `VIBB_GO_API=http://127.0.0.1:<port>` + `VIBB_GO_UNIT=vibb-soloistd` on the daemon/player/bt-reconnect units; rollback = `--librespot`. Testable against a fake systemctl like `audio_stack_toggle.py`. |
+| 4 | owed | `pi/soloistd.py` — P1 of PLAN-soloistd.md (~1.5-2k lines): the sidecar that speaks the go-librespot REST dialect over Soloist's WebSocket; supervises the child (exit 10 latches); the resume walk with the volume shroud; the audio binding from §I (`--pipewire-device` from `audio.find_*`, the null sink for warming, the AM-16 bind check). Contract test `tests/soloist_contract.py` + a stdlib fake WS server so CI drives the REAL sidecar. |
+| 5 | owed | pairing in the PWA (`--pair` via a oneshot unit), the weekly updater unit + timer, `/soloist/health` with days_left, the expiry screen state. |
+
+Steps 3-5 have two hard prerequisites outside the repo: the box on the
+pipewire stack (Soloist has no ALSA backend), and a personal Soloist
+API key from a Premium account (the son's family-member account
+qualifies). Step 4 needs the owner's green light and the bench with a
+paired Soloist before it starts — it is the one piece that cannot be
+unit-tested into existence.
+
 ---
 
 # PART 1 — Architect design (2026-09-02), with QA-2 marks

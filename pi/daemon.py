@@ -143,7 +143,7 @@ def _uptime():
 
 from vibb.paths import (  # noqa: E402
     ART_DIR, MEDIA_DIR, RUN_DIR, STATE_DIR, clock_trusted,
-    go_restarted_within,
+    go_restarted_within, go_unit_cmd,
     note_go_restart)
 
 # Module-level aliases: internal code (and the tests, which monkeypatch
@@ -749,8 +749,8 @@ class Orchestrator:
         was just) started, False when there is genuinely no internet so
         the caller can fail FAST instead of a 30s silent session-wait."""
         try:
-            if subprocess.run(["systemctl", "is-active", "--quiet",
-                               "go-librespot"], timeout=10).returncode == 0:
+            if subprocess.run(go_unit_cmd("is-active", "--quiet"),
+                              timeout=10).returncode == 0:
                 return True
         except (OSError, subprocess.TimeoutExpired):
             return True  # can't tell — let the normal path try
@@ -759,7 +759,7 @@ class Orchestrator:
             return False
         _SPOT_OFFLINE[0] = False
         try:
-            subprocess.run(["systemctl", "start", "go-librespot"],
+            subprocess.run(go_unit_cmd("start"),
                            timeout=30)
             log("go-librespot was parked — started for the play request")
         except (OSError, subprocess.TimeoutExpired):
@@ -3102,7 +3102,7 @@ def _net_changed():
         return
     log("network changed — restarting go-librespot (stale connections)")
     try:
-        subprocess.run(["systemctl", "try-restart", "go-librespot"],
+        subprocess.run(go_unit_cmd("try-restart"),
                        timeout=30)
         _note_go_restart()
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -3866,7 +3866,7 @@ class Handler(BaseHTTPRequestHandler):
                     _SPOT_OFFLINE[0] = False
                     threading.Thread(
                         target=lambda: subprocess.run(
-                            ["systemctl", "start", "go-librespot"],
+                            go_unit_cmd("start"),
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, timeout=30),
                         daemon=True).start()
@@ -5116,7 +5116,7 @@ def _go_output_rebuild():
     else:
         log("rebuilding go-librespot's audio output (restart)")
         try:
-            subprocess.run(["systemctl", "restart", "go-librespot"],
+            subprocess.run(go_unit_cmd("restart"),
                            timeout=30)
         except (OSError, subprocess.TimeoutExpired) as e:
             log(f"go-librespot output rebuild failed: {e!r}")
@@ -5271,7 +5271,7 @@ def _go_unit_active():
     'actually down'. Busy must never be treated as dead."""
     try:
         return subprocess.run(
-            ["systemctl", "is-active", "--quiet", "go-librespot"],
+            go_unit_cmd("is-active", "--quiet"),
             timeout=10).returncode == 0
     except (OSError, subprocess.TimeoutExpired, AttributeError):
         return False
@@ -5304,7 +5304,7 @@ def _spotify_supervisor():
                 misses = 0
                 _SPOT_OFFLINE[0] = False
                 if parked:
-                    subprocess.run(["systemctl", "start", "go-librespot"],
+                    subprocess.run(go_unit_cmd("start"),
                                    timeout=30)
                     log("spotify: internet is back — go-librespot started")
                     _note_go_restart()  # the ip watchdog must not re-restart it
@@ -5361,7 +5361,7 @@ def _spotify_supervisor():
                     continue
                 _SPOT_OFFLINE[0] = True
                 if _go_unit_active():  # don't fork systemctl every tick
-                    subprocess.run(["systemctl", "stop", "go-librespot"],
+                    subprocess.run(go_unit_cmd("stop"),
                                    timeout=30)
                 if not parked:
                     log("spotify: no internet — go-librespot parked "

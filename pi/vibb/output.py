@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 
-from vibb.paths import STATE_DIR
+from vibb.paths import STATE_DIR, go_unit_cmd
 
 OUT_FILE = os.path.join(STATE_DIR, "output.json")
 GO_CONFIG = os.environ.get("VIBB_GO_CONFIG", "")  # go-librespot config.yml
@@ -64,7 +64,7 @@ def resize_spotify_cache(gb):
     os.replace(GO_CONFIG + ".tmp", GO_CONFIG)
     log(f"spotify cache limit -> {gb}GB (restarting go-librespot)")
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — restart it manually")
 
@@ -92,7 +92,7 @@ def set_spotify_bitrate(kbps):
     os.replace(GO_CONFIG + ".tmp", GO_CONFIG)
     log(f"spotify bitrate -> {kbps} kbps (restarting go-librespot)")
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — restart it manually")
 
@@ -167,7 +167,7 @@ def _retarget_go_librespot(pcm):
     if not _write_audio_device(pcm):
         return False
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — config updated, "
             "restart it manually")
