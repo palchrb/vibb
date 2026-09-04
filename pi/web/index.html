@@ -248,9 +248,19 @@
   <div class="card">
     <h2>Spotify</h2>
     <p id="spotify-current" class="dim">–</p>
+    <p id="spotify-state" class="dim small" hidden></p>
     <div class="controls">
       <button id="btn-spotify-logout">Switch account</button>
     </div>
+    <form id="soloist-key-form" hidden>
+      <input id="soloist-key" type="password" placeholder="Soloist API key"
+             autocomplete="off" spellcheck="false">
+      <button type="submit">Save key</button>
+      <button type="button" id="btn-soloist-key-forget" class="danger">Forget key</button>
+    </form>
+    <p id="soloist-key-help" class="dim small" hidden>Generated on Spotify's
+    developer dashboard by the account this box should play for (Premium).
+    Saved on the box only; the engine restarts with it.</p>
     <p class="dim small">The box locks to one account so no passing phone can
     take it over. Switch account opens it briefly: pick the box under Devices
     in the Spotify app (same Wi-Fi) with the account you want — it logs in,

@@ -124,6 +124,7 @@ for _p in (_here, "/usr/local/lib/vibb-py"):
         break
 from vibb import backup as _backup  # noqa: E402 — state snapshots to restic
 from vibb import audio as _audio  # noqa: E402
+from vibb import paths  # noqa: E402
 from vibb import content, mpv as _mpv, spotify as _spotify  # noqa: E402
 from vibb import renderer as _renderer  # noqa: E402 — sonos axis+client
 from vibb import spotify_web as _spotify_web  # noqa: E402
@@ -201,6 +202,29 @@ _sonos_wake = threading.Event()  # poke the sonos poller (controls, switch)
 # in /status as spotify_offline so the clients can SAY "no internet"
 # instead of silently failing (wifi can be up while the WAN is dead)
 _SPOT_OFFLINE = [False]
+# The Soloist API key file the PWA writes (KEY=VALUE for the unit's
+# EnvironmentFile=; 0600; SECRET tier of the backup). PLAN-pipewire-soloist D2.
+SOLOIST_ENV = os.environ.get("VIBB_SOLOIST_ENV", "/etc/vibb/soloist.env")
+# Engine states in which NO session can come, whatever we wait for — the
+# daemon fast-fails a Spotify tap on them instead of spawning a player that
+# waits 30 s for a username and exits into a dead box (AM-48)
+ENGINE_NO_SESSION = ("needs-key", "needs-pair", "expired", "bad-key",
+                     "audio-unbound")
+
+
+def _engine_state():
+    """The Spotify engine's own verdict (soloistd's spotify_state), or the
+    go-librespot-era pair: 'offline' while the supervisor holds the unit
+    parked for no internet, else 'ok'."""
+    try:
+        st = go_status(timeout=2)
+    except OSError:
+        st = {}
+    s = st.get("spotify_state") if isinstance(st, dict) else None
+    if s:
+        return s
+    return "offline" if _SPOT_OFFLINE[0] else "ok"
+
 
 
 def _queue_map():
@@ -897,6 +921,7 @@ class Orchestrator:
         # resume-in-place shortcut anyway (its API is down), and when
         # the shortcut does hit, the extra is-active probe is a no-op.
         backend_ok = not is_spotify(target) or self._ensure_spotify_backend()
+        engine_state = _engine_state() if is_spotify(target) else "ok"
         if not boot:
             _SESSION["live"] = False   # a tap ends the power-on session
         with self.lock:
@@ -956,6 +981,14 @@ class Orchestrator:
                                 "resumed": True}
                 except OSError:
                     pass  # session gone — fall through to respawn (bookmark)
+            if is_spotify(target) and engine_state in ENGINE_NO_SESSION:
+                # the engine itself says no session can come (no key, not
+                # paired, an expired build, a mis-bound stream): say so NOW
+                # — the same bedtime rule as the no-internet case below
+                log(f"play: spotify engine {engine_state} — can't start")
+                return {"source": "spotify", "target": target,
+                        "error": f"spotify-{engine_state}",
+                        "spotify_state": engine_state}
             if is_spotify(target) and not backend_ok:
                 # parked and genuinely offline: say so NOW — spawning a
                 # player that waits 30s for a session that cannot come
@@ -2636,6 +2669,7 @@ class Orchestrator:
                "title": None, "position": None, "duration": None,
                "artwork": None, "episode_id": None, "shuffle": False,
                "spotify_offline": bool(_SPOT_OFFLINE[0]),
+               "spotify_state": _engine_state(),
                "session": _SESSION["verdict"] or "pending",
                "output": current_output()["output"]}
         if source == "sonos":
@@ -3782,6 +3816,39 @@ class Handler(BaseHTTPRequestHandler):
                     save_library(normalize_library(lib))
                 log(f"section logo {'set' if data else 'removed'}: {sid}")
                 self._send(200, lib)
+            elif self.path == "/soloist/configure":
+                # The Soloist API key, pasted in the PWA (D2/AM-46/47). Only
+                # the soloist engine has anywhere to put it. Written 0600 as
+                # KEY=VALUE for the unit's EnvironmentFile=, then the unit is
+                # restarted (it reads the file at start; the sidecar answers
+                # needs-key / bad-key / expired / ok on /soloist/health). An
+                # empty key REMOVES the file -> needs-key. Never logged.
+                key = body.get("api_key")
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist",
+                                     "engine": paths.GO_UNIT})
+                elif key is None or not isinstance(key, str) or len(key) > 512 \
+                        or (key and (not key.isprintable() or any(c.isspace() for c in key))):
+                    self._send(400, {"error": "bad-key-shape"})
+                else:
+                    try:
+                        if key:
+                            _backup._write_secret_text(SOLOIST_ENV,
+                                                       f"SOLOIST_API_KEY={key}")
+                        else:
+                            try:
+                                os.remove(SOLOIST_ENV)
+                            except FileNotFoundError:
+                                pass
+                        subprocess.run(go_unit_cmd("--no-block", "restart"),
+                                       timeout=10)
+                        log("soloist: API key " + ("updated" if key else "removed")
+                            + " — engine restarting")
+                        self._send(202, {"restarting": True,
+                                         "removed": not key})
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        self._send(500, {"error": "write-failed",
+                                         "detail": e.__class__.__name__})
             elif self.path == "/backup/configure":
                 # Point the box at ANY rclone-backed restic repo. The owner
                 # runs `rclone config` on their own machine (which is what

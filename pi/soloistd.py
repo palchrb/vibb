@@ -204,6 +204,7 @@ class Engine:
         self.node = None
         self.last_lines = []
         self.restarts = 0
+        self.bad_key = False                   # the child said the key is no good
         self.bound = None                      # AM-16: None unknown, True/False
         self._binding = False                  # one authoritative check in flight
         self.stop = threading.Event()
@@ -297,6 +298,12 @@ class Engine:
                         break
             if "build" in low and self.build is None and "soloist" in low:
                 self.build = line.strip()
+            # Which line means 'bad key' is NOT documented (AM-47: bench it
+            # once with a mangled key); until then the widest honest net.
+            if "api key" in low or "api-key" in low or "apikey" in low:
+                if any(w in low for w in ("invalid", "unauthori", "forbidden",
+                                          "rejected", "denied")):
+                    self.bad_key = True
 
     def _wait_child(self, child):
         rc = child.wait()
@@ -313,6 +320,12 @@ class Engine:
                 pass
             self.set_state("expired")
             log("soloist exit 10: build expired — latched, not restarting")
+            return
+        if self.bad_key:
+            # not a restart case: a new key arrives as a UNIT restart from
+            # /soloist/configure, which starts a fresh sidecar
+            self.set_state("bad-key")
+            log("soloist rejected the API key — waiting for a new one")
             return
         self.set_state("offline")
         delay = RESTART_BACKOFF_S[min(self.restarts, len(RESTART_BACKOFF_S) - 1)]
@@ -433,7 +446,7 @@ class Engine:
             threading.Thread(target=self._bind_check, args=(True,), daemon=True).start()
 
     def _derive_state(self):
-        if self.state in ("expired", "needs-key"):
+        if self.state in ("expired", "needs-key", "bad-key"):
             return
         if not self.auth["logged_in"]:
             self.set_state("needs-pair")
