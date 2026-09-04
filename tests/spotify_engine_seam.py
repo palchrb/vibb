@@ -110,8 +110,10 @@ assert r.returncode == 2, f"--soloist must refuse: rc={r.returncode}"
 assert "PipeWire" in r.stderr and "--pipewire" in r.stderr, r.stderr
 assert "ENGINE=" not in r.stdout, "it must refuse BEFORE doing anything"
 r = run_flags("--pipewire", "--soloist")
-assert r.returncode == 2 and "not built" in r.stderr and "PLAN-soloistd" in r.stderr, r.stderr
-print("4b. --soloist refuses early: needs --pipewire, then 'sidecar not built' OK")
+assert r.returncode == 0 and "ENGINE=soloist" in r.stdout, r.stdout + r.stderr
+# (the "sidecar not built" refusal is exercised by spotify_engine_toggle.py
+#  against a tree without pi/soloistd.py; here the real tree has it)
+print("4b. --soloist refuses without --pipewire; resolves with it OK")
 
 r = run_flags("--nonsense")
 assert r.returncode == 2 and "unknown option" in r.stderr, r.stderr

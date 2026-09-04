@@ -111,6 +111,7 @@ EnvironmentFile=-$_SE_ENV
 StateDirectory=vibb-soloist
 CacheDirectory=vibb-soloist
 Environment=VIBB_SOLOISTD_PORT=$SOLOISTD_PORT
+Environment=VIBB_DEVICE_NAME=${DEVICE_NAME:-Vibb}
 $(audio_stack_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-soloistd
 Restart=on-failure
