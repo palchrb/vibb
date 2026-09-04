@@ -69,6 +69,87 @@ ERRORS = {"/context/tracks": {400}, "/player/output": {404}}
 PLAY_ORIGIN_BOX = ("go-librespot", "", None)   # box-initiated playback
 
 
+# --- the OTHER side: Soloist's WebSocket dialect (docs 2026-09-04) ----------
+# Envelope: {"type": "command", "command": <name>, **fields}; replies are
+# {"type": "command_result", "command": ..} or {"type": "error",
+# "message": ..}; everything else is an event. Control commands are
+# accepted ASYNCHRONOUSLY — confirmation is the state-change event, never
+# the command_result (the spike's cmd()/wait_for pattern).
+WS_COMMANDS = {
+    "get_auth_state": set(), "get_state": set(), "get_queue": {"limit"},
+    "play": {"uri"},                # bare play = resume; uri = start a context
+    "pause": set(), "skip_next": set(), "skip_prev": set(),
+    "seek": {"position_ms"}, "set_volume": {"volume"},        # 0..100
+    "set_shuffle": {"enabled"}, "set_repeat_context": {"enabled"},
+    "set_repeat_track": {"enabled"}, "add_to_queue": {"uri"},
+    "activate": set(), "deactivate": set(),
+}
+WS_EVENTS = {
+    "auth_state": {"logged_in", "is_active", "device_name"},
+    "playback_state": {"status", "item", "context", "position", "volume",
+                       "is_active", "options", "available_actions"},
+    "track_changed": {"item"}, "playback_changed": {"status"},
+    "volume_changed": {"volume"}, "context_changed": {"context"},
+    "options_changed": {"options"}, "position_sync": {"position"},
+    "queue_changed": {"previous", "upcoming"},   # entries: uid, source, item
+    "command_result": {"command"}, "error": {"message"},
+}
+WS_STATUS = ("idle", "playing", "paused", "buffering")
+WS_QUEUE_SOURCE = ("context", "queue", "autoplay")   # autoplay rows: not ours
+ENTITY_TYPES = ("track", "episode", "artist", "album", "playlist", "show",
+                "ad", "unknown")
+# Entity: uri, entity_type, decorations{identity{name}, visual_identity
+# {cover[{url,size}]}, parent{entity}, creators[{entity}], playback
+# {duration_ms, content_ratings}}. Broadcast queue_changed is capped at 10
+# entries; get_queue limit=0 returned exactly 80 upcoming on the bench.
+
+# --- the translation table: what soloistd does per REST endpoint -----------
+# (values are the design, PLAN-soloistd.md; tests read the KEYS)
+TRANSLATE = {
+    "/status":                 "playback_state mirror (+position_sync interpolation, auth_state)",
+    "/player/play":            "play uri; skip_to_uri -> the resume walk (pause, skip_next until item.uri, seek, play) under the volume shroud",
+    "/player/pause":           "pause",
+    "/player/resume":          "play (bare)",
+    "/player/playpause":       "pause | play by status",
+    "/player/next":            "skip_next",
+    "/player/prev":            "skip_prev (the prev-restart dance stays client-side in spotify.command)",
+    "/player/seek":            "seek position_ms",
+    "/player/volume":          "set_volume (volume_steps=100 makes the scaling identity)",
+    "/player/shuffle_context": "set_shuffle enabled",
+    "/player/output":          "restart the child with the new --pipewire-device (no live reopen)",
+    "/context/tracks":         "get_queue limit=0 for the ACTIVE context (80-window); Web API listing is P2",
+    "/cache/snapshot":         "404 (no such thing) — library.py fails open",
+    "/cache/download":         "404 — warming (D3) replaces it: play ~2s + skip_next per item on vibb_null",
+}
+
+
+def sample_playback_state(**over):
+    """A playback_state the fake WS server emits and soloistd mirrors."""
+    st = {"type": "playback_state", "status": "playing", "is_active": True,
+          "item": sample_entity("spotify:track:x", "T", ["A"], "L", 180000),
+          "context": {"uri": "spotify:playlist:p", "entity_type": "playlist",
+                      "decorations": {"identity": {"name": "P"}}},
+          "position": {"position_ms": 12000, "timestamp_ms": 0, "speed": 1.0},
+          "volume": 50,
+          "options": {"shuffle": False, "repeat": "off", "playback_speed": 1.0},
+          "available_actions": {"pause": {}, "seek": {}, "skip_next": {}}}
+    st.update(over)
+    return st
+
+
+def sample_entity(uri, name, artists, album, duration_ms, cover="https://i/x.jpg"):
+    return {"uri": uri, "entity_type": uri.split(":")[1],
+            "decorations": {
+                "identity": {"name": name},
+                "visual_identity": {"cover": [{"url": cover, "size": "large"}]},
+                "parent": {"entity": {"uri": "spotify:album:a", "entity_type": "album",
+                                      "decorations": {"identity": {"name": album}}}},
+                "creators": [{"entity": {"uri": "spotify:artist:r", "entity_type": "artist",
+                                         "decorations": {"identity": {"name": a}}}}
+                             for a in artists],
+                "playback": {"duration_ms": duration_ms, "content_ratings": []}}}
+
+
 def sample_status(**over):
     """A /status the whole box accepts — the shape both fakes must emit."""
     st = {"username": "kid", "paused": False, "stopped": False,
@@ -112,7 +193,14 @@ def selfcheck():
             assert sent <= keys, f"{path} sends {sent - keys} not in the contract"
     # 4. the play_origin box value survives (the phone-clobber guard)
     assert 'origin != "go-librespot"' in src
-    print("contract self-check: endpoints, bodies, origin value OK")
+    # 5. the translation table covers every endpoint, and only those
+    assert set(TRANSLATE) == set(ENDPOINTS), set(TRANSLATE) ^ set(ENDPOINTS)
+    # 6. the samples carry every field the box reads
+    st = sample_status()
+    assert STATUS_FIELDS <= set(st) and TRACK_FIELDS <= set(st["track"])
+    ps = sample_playback_state()
+    assert WS_EVENTS["playback_state"] <= set(ps)
+    print("contract self-check: endpoints, bodies, origin value, translation, samples OK")
     return True
 
 
