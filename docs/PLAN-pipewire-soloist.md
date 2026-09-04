@@ -286,8 +286,9 @@ that updates. Design:
   nothing plays, the radio is free, the run is bounded by
   `BACKUP_MAX_S`-style patience) PLUS the weekly timer as the safety
   net for boxes that are never shut down cleanly. Both call one
-  `soloistd.update()`; both skip on the hotspot (a 12.8 MB download
-  over the phone's data) and whenever `_audible_now`.
+  `soloistd.update()`; both skip whenever `_audible_now`, and on ANY
+  wifi otherwise — hotspot included (owner, 2026-09-04: the box does not
+  ration the owner's data; 12.8 MB once per build change).
 - **When:** whenever the ETag changed, not only near expiry — a fresh
   build is a fresh 90 days, and the check is free. Expiry is read from
   the child's own startup line ("client expires in N days", FIELD
@@ -336,8 +337,8 @@ the same invariants the rest of the box lives by:
   på wifi, så skal den jobbe med cachen, uansett"). The earlier
   home-wifi-only gate is dropped: a car trip on the phone's hotspot is
   exactly when the next tap should already be cached, and the owner
-  owns that data budget, not the box. (The UPDATER keeps its hotspot
-  skip: a 12.8 MB binary is not the cache — say the word and it goes too.)
+  owns that data budget, not the box. The updater follows the same
+  rule (D1).
 - **silent by construction** — the child is retargeted to `vibb_null`
   for the warm (§I), volume-0 as belt; the HAT and BT nodes stay
   `suspended` (bench B9 asserts it);
