@@ -267,6 +267,91 @@ qualifies). Step 4 needs the owner's green light and the bench with a
 paired Soloist before it starts — it is the one piece that cannot be
 unit-tested into existence.
 
+### Phase 3 decisions (owner, 2026-09-04) — three things the plan had, moved
+
+**D1. The updater rides the idle-shutdown hook, like the backup — and
+the CDN gives us a free, zero-byte check.** Verified against
+`https://soloist-builds.spotifycdn.com/soloist_release_arm64.tar.gz`
+on 2026-09-04: a fixed URL (no versioned/"latest" variants, no
+manifest, no signature — the docs say so), but the CDN answers `HEAD`
+with `etag`, `last-modified`, `content-length` (12.8 MB),
+`accept-ranges: bytes` and an `x-amz-checksum-crc32c`, and honours
+`If-None-Match` (a wrong ETag + a 1-byte range returned 206; the stored
+ETag returns 304). So the check is one round trip with no body:
+`GET If-None-Match: <stored etag>` → 304 = nothing new. The build was
+dated the same morning it was probed: Spotify rebuilds often, so
+"latest" is always fresh and the 90-day fuse is a non-event for a box
+that updates. Design:
+- **Trigger:** the idle-shutdown hook (`idle.py`, the backup's slot:
+  nothing plays, the radio is free, the run is bounded by
+  `BACKUP_MAX_S`-style patience) PLUS the weekly timer as the safety
+  net for boxes that are never shut down cleanly. Both call one
+  `soloistd.update()`; both skip on the hotspot (a 12.8 MB download
+  over the phone's data) and whenever `_audible_now`.
+- **When:** whenever the ETag changed, not only near expiry — a fresh
+  build is a fresh 90 days, and the check is free. Expiry is read from
+  the child's own startup line ("client expires in N days", FIELD
+  FINDING #3), surfaced as `/soloist/health.days_left`; below 21 days
+  with no successful update the screen warns, below 7 it is red, and
+  an exit-10 child becomes the clear "Spotify trenger oppdatering"
+  state — never a silent box.
+- **How:** download to a tmp under the binary's dir, verify the
+  `x-amz-checksum-crc32c` against the file (not a signature, but it
+  catches every truncated or corrupted download, which "TLS +
+  exec-sanity" did not), run `--version` on the new file (exec-sanity
+  + the build timestamp), `os.replace`, store the ETag, restart the
+  child only if it is idle (the plan's "defer swap while playing").
+  Never `apt`-style pinning, never a rollback copy beyond the previous
+  binary kept as `soloist.prev` for one cycle.
+- **Redistribution:** the box downloads for itself from Spotify's URL;
+  the repo never ships the archive (the docs forbid it).
+
+**D2. The API key is entered in the PWA, not at install time.**
+`--soloist` provisions units and config with NO key; soloistd starts
+and sits in a clear `needs-key` state (screen + `/status`, the bedtime
+rule) until `POST /soloist/configure {api_key}` — the backup page's
+pattern: token-gated, local confirm in the PWA before submit, written
+`0600` under `/etc/vibb/soloist.json`, SECRET tier of the backup
+whitelist next to `storytel.json`/`spotify-api.json`. The child is
+then started with `-k` from that file; the key never appears in a unit
+file, an argv visible to `ps`, or a log line (the docs: "treat as
+secret" — so it goes in via an env file the unit reads, `EnvironmentFile=`,
+and the child gets `-k "$SOLOIST_API_KEY"` from a wrapper, not from
+the daemon's argv). Rotating it = the same POST; removing it = the
+`needs-key` state again. Pairing (`--pair`) stays a separate PWA step
+after the key.
+
+**D3. Cache warming fires on library ADD, gated on the radio, not on
+the charger.** The plan gated warming on charger + idle + home wifi.
+The owner's call: the moment a Spotify entry is saved in the PWA, warm
+it — the bench proved whole-file caching from ~2 s of play (91 MB from
+30 s of a 157-min episode), so a playlist warms in minutes, and the
+kid's next tap is then radio-free. Gates that STAY, because they are
+the same invariants the rest of the box lives by:
+- **never during active A2DP playback** — the shared-radio rule every
+  guard in `radio.py`/`_audible_now`/the sweep's `BUSY_CHECK` enforces;
+  a warm that starts while the box is idle ABORTS the instant a play
+  starts (any button/tap/card), exactly like the sweep yields;
+- **never on the hotspot** — warming over the phone's metered link pays
+  the bill the cache exists to avoid (`netmgmt`'s hotspot marker);
+- **silent by construction** — the child is retargeted to `vibb_null`
+  for the warm (§I), volume-0 as belt; the HAT and BT nodes stay
+  `suspended` (bench B9 asserts it);
+- **one engine, one session** — warming cannot overlap the kid's
+  Spotify playback (same child), and while the kid plays a podcast on
+  the HAT (no A2DP) warming may proceed: PipeWire mixes, the null sink
+  is a separate node, and wifi is free.
+Dropped from the gate: charger and idle. The trigger is the library
+write (`/library` save → the sweeper's existing wake, a new branch for
+soloist-routed entries with `cache: N`), plus the sweep's normal pass
+for anything missed (offline at add time, aborted by a play).
+Play-history pollution stays accepted (it is the kid's content on the
+kid's account). The mechanism per item: `play uri` → wait for the first
+`track_changed` and ~2 s → `skip_next` … until the listing is
+exhausted, with the resume-walk's volume shroud; the cache canary's
+ledger records what was warmed so a swap (D1) can re-warm the same
+list if the cache turns out to be voided by a build change.
+
 ---
 
 # PART 1 — Architect design (2026-09-02), with QA-2 marks
