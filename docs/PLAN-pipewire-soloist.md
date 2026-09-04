@@ -399,7 +399,8 @@ the tree and pinned. What is left, by who can answer it:
 | AM-26 boot-fail grace in btwatchd | only if bench B1 shows `NotAvailable` during WirePlumber's init |
 | bench: does `skip_next` cancel the in-flight fetch; is a truncated file served partial or re-fetched | the Pi 5 with a paired Soloist (two lines in `soloist_spike.py`) |
 | bench: which child log line means bad-key (AM-47); the order of `get_queue.previous` (assumed most-recent-first) | same session |
-| bench S4 (codec/suspend/no-110b/headset buttons), S3c on a flash, the HAT node's name, go-librespot's live reopen through pipewire-alsa (s6) | the spare Zero on Trixie Lite |
+| bench S4 (codec/suspend/no-110b/headset buttons), S3c on a flash, go-librespot's live reopen through pipewire-alsa (s6) | the spare Zero on Trixie Lite |
+| ~~the HAT node's name~~ — SETTLED from the kernel source 2026-09-04: Pimoroni's README says only `dtoverlay=hifiberry-dac` (nothing on card names or PipeWire); the overlay's `hifiberry,hifiberry-dac` binds `rpi-simple-soundcard.c`, whose table sets `.card_name = "snd_rpi_hifiberry_dac"` (driver_name `RPi-simple`, DAI `HifiBerry DAC`). ALSA's id `sndrpihifiberry` is that name stripped; PipeWire's `alsa.card_name` is that name verbatim, so `find_local_sink`'s `hifiberry` match is guaranteed. The full node name (expected `alsa_output.platform-soc_sound.stereo-fallback`) is only worth recording on the Zero, never gating. | closed |
 
 **Owed to the bench before warming is coded (QA item 5):** does a
 `skip_next`/`pause` CANCEL the in-flight fetch (then "2 s per item" is
