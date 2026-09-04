@@ -228,6 +228,34 @@ def _sidecar_post(path, body=None, timeout=5):
             return e.code, {}
 
 
+_UPDATE_KICK = {"at": 0.0}
+UPDATE_KICK_COOLDOWN_S = float(os.environ.get("VIBB_SOLOIST_UPDATE_KICK_S", "600"))
+
+
+def _kick_soloist_update(why):
+    """An EXPIRED Soloist build must not wait for the next idle shutdown
+    or the 6 h timer: the moment anyone notices — a tap on a Spotify card,
+    the supervisor's tick after boot, the PWA's button — start the
+    updater unit now, --no-block, at most once per cooldown. The unit's
+    own gates (trusted clock, busy) still apply; the sidecar drops the
+    latch and restarts the child when it is idle (it is: nothing plays).
+    Owner 2026-09-04: 'da burde man kunne kicke ny download'."""
+    if paths.GO_UNIT != "vibb-soloistd":
+        return False
+    now = time.monotonic()
+    if now - _UPDATE_KICK["at"] < UPDATE_KICK_COOLDOWN_S:
+        return False
+    _UPDATE_KICK["at"] = now
+    try:
+        subprocess.run(["systemctl", "start", "--no-block",
+                        "vibb-soloist-update.service"], timeout=10)
+        log(f"soloist build expired ({why}) — update kicked")
+        return True
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"soloist update kick failed: {e!r}")
+        return False
+
+
 def _engine_state():
     """The Spotify engine's own verdict (soloistd's spotify_state), or the
     go-librespot-era pair: 'offline' while the supervisor holds the unit
@@ -1002,6 +1030,8 @@ class Orchestrator:
                 # paired, an expired build, a mis-bound stream): say so NOW
                 # — the same bedtime rule as the no-internet case below
                 log(f"play: spotify engine {engine_state} — can't start")
+                if engine_state == "expired":
+                    _kick_soloist_update("play tap")
                 return {"source": "spotify", "target": target,
                         "error": f"spotify-{engine_state}",
                         "spotify_state": engine_state}
@@ -3865,6 +3895,13 @@ class Handler(BaseHTTPRequestHandler):
                     except (OSError, subprocess.TimeoutExpired) as e:
                         self._send(500, {"error": "write-failed",
                                          "detail": e.__class__.__name__})
+            elif self.path == "/soloist/update":
+                # the PWA's 'Update Spotify now' (token-gated); same kick,
+                # same cooldown — the unit reports through /soloist/health
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist"})
+                else:
+                    self._send(202, {"kicked": _kick_soloist_update("pwa")})
             elif self.path == "/soloist/pair":
                 # proxied to the sidecar (it owns the data dir): stop the
                 # child, run `soloist --pair`, start again. Token-gated here.
@@ -5390,6 +5427,10 @@ def _spotify_supervisor():
     while True:
         _tick(20 if (parked or _SPOT_OFFLINE[0]) else idle_tick_s)
         try:
+            if paths.GO_UNIT == "vibb-soloistd" and _engine_state() == "expired":
+                # after a boot onto an expired build nobody has tapped yet:
+                # fetch the new one without waiting for a shutdown
+                _kick_soloist_update("supervisor tick")
             if _radio.paging():
                 # a BT page owns the radio right now — a probe result is
                 # noise either way (field 2026-07-18 20:17: page-deauthed

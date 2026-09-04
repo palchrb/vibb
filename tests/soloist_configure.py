@@ -151,4 +151,29 @@ assert 'id="btn-soloist-pair"' in html and '"/soloist/pair"' in js
 assert 'state !== "needs-pair"' in js, "the pair button shows for needs-pair only"
 print("7. /soloist/pair proxied, gated, 409 under go-librespot; PWA button OK")
 
+# 8. an EXPIRED build kicks the updater at once — a tap, the supervisor's
+#    tick, the PWA button — once per cooldown; never under go-librespot
+RUNS.clear()
+ENGINE["st"] = {"spotify_state": "expired"}
+daemon._UPDATE_KICK["at"] = 0.0
+r = orch.play(target)
+assert r["error"] == "spotify-expired"
+assert RUNS == [["systemctl", "start", "--no-block", "vibb-soloist-update.service"]], RUNS
+RUNS.clear()
+orch.play(target)
+assert RUNS == [], "inside the cooldown: no second kick"
+daemon._UPDATE_KICK["at"] = 0.0
+code, r = call("/soloist/update")
+assert code == 202 and r["kicked"] is True and len(RUNS) == 1, (code, r, RUNS)
+assert call("/soloist/update", tok=None)[0] == 401
+paths.GO_UNIT = "go-librespot"
+assert call("/soloist/update")[0] == 409 and daemon._kick_soloist_update("x") is False
+paths.GO_UNIT = "vibb-soloistd"
+src = open(daemon.__file__, encoding="utf-8").read()
+i = src.index("def _spotify_supervisor(")
+assert '_engine_state() == "expired"' in src[i:i + 3000] and "_kick_soloist_update(" in src[i:i + 3000], \
+    "the supervisor tick kicks the update after a boot onto an expired build"
+assert 'id="btn-soloist-update"' in html and '"/soloist/update"' in js
+print("8. expired -> the updater is kicked now (tap / tick / PWA), once per cooldown OK")
+
 print("\nall soloist_configure checks passed")

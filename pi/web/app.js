@@ -776,7 +776,7 @@ const SPOTIFY_STATE_TEXT = {
   "needs-key": "Needs a Soloist API key — paste it below.",
   "bad-key": "Spotify rejected the API key — paste a new one.",
   "needs-pair": "Key saved. Pick the box under Devices in the Spotify app to pair.",
-  "expired": "Spotify needs an update — the box fetches it at the next shutdown.",
+  "expired": "Spotify's build has expired — the box is fetching a new one.",
   "audio-unbound": "Spotify could not bind its audio output — check the audio stack.",
   "offline": "No internet — Spotify reconnects when it's back.",
 };
@@ -793,6 +793,16 @@ function renderSpotifyState(state) {
   if ($("#soloist-key-form")) $("#soloist-key-form").hidden = !show;
   if ($("#soloist-key-help")) $("#soloist-key-help").hidden = !show;
   if ($("#soloist-pair")) $("#soloist-pair").hidden = state !== "needs-pair";
+  if ($("#soloist-update")) $("#soloist-update").hidden = state !== "expired";
+}
+
+if ($("#btn-soloist-update")) {
+  $("#btn-soloist-update").addEventListener("click", async () => {
+    try {
+      const r = await api("/soloist/update", { method: "POST" });
+      toast(r.kicked ? "Fetching the new Spotify build…" : "Already fetching — give it a minute", 6000);
+    } catch (e) { toast(e.message, 8000); }
+  });
 }
 
 if ($("#btn-soloist-pair")) {

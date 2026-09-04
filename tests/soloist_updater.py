@@ -180,6 +180,7 @@ print("6. clock/busy gates skip without touching the network; stale tmp cleaned 
 #    still runs and records what is available; it IS downloaded when the
 #    installed build nears expiry, is expired, or its expiry is unknown
 CDN["body"], CDN["etag"] = make_archive("5.0"), '"e5"'
+assert U.DOWNLOAD_WHEN_DAYS_LEFT == 60, "a fresh build about every 30 days (owner)"
 HEALTH.update(state="ok", days_left=61)
 CDN["hits"].clear()
 r = U.update(URL, BIN, budget_s=30)
@@ -187,7 +188,7 @@ assert r["result"] == "not-yet" and "61 days" in r["why"], r
 assert U.state()["etag"] == '"e4"' and U.state()["available"]["etag"] == '"e5"'
 assert len(CDN["hits"]) == 1 and CDN["hits"][0][1] == "bytes=0-0", "only the 1-byte check"
 assert "4.0" in open(BIN).read()
-HEALTH.update(days_left=30)
+HEALTH.update(days_left=60)
 r = U.update(URL, BIN, budget_s=30)
 assert r["result"] == "updated" and "5.0" in r["version"], r
 CDN["body"], CDN["etag"] = make_archive("6.0"), '"e6"'

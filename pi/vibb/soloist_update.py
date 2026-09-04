@@ -58,7 +58,10 @@ BUDGET_S = float(os.environ.get("VIBB_SOLOIST_UPDATE_BUDGET_S", "120"))
 # frequent; the DOWNLOAD happens only when the installed build is getting
 # close to its 90-day expiry — or when there is nothing installed, the
 # installed one is expired/latched, or its age is unknown.
-DOWNLOAD_WHEN_DAYS_LEFT = int(os.environ.get("VIBB_SOLOIST_UPDATE_DAYS_LEFT", "30"))
+# 60 days left = the installed build is ~30 days old: a fresh build about
+# every 30 days (owner), which also keeps >= 60 days of margin on the box
+# for a long offline stretch. ~12 x 12.8 MB a year.
+DOWNLOAD_WHEN_DAYS_LEFT = int(os.environ.get("VIBB_SOLOIST_UPDATE_DAYS_LEFT", "60"))
 UA = "vibb-soloist-update/1"
 
 
