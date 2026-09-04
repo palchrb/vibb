@@ -204,6 +204,8 @@ class Engine:
         self.node = None
         self.last_lines = []
         self.restarts = 0
+        self.bound = None                      # AM-16: None unknown, True/False
+        self._binding = False                  # one authoritative check in flight
         self.stop = threading.Event()
         # every WS event lands in a bounded log with a sequence number;
         # waiters scan entries NEWER than the point they started waiting.
@@ -222,7 +224,7 @@ class Engine:
     def health(self):
         return {"state": self.state, "days_left": self.days_left, "build": self.build,
                 "child": self.child.pid if self.child and self.child.poll() is None else None,
-                "ws": self.ws is not None, "node": self.node,
+                "ws": self.ws is not None, "node": self.node, "bound": self.bound,
                 "device_name": DEVICE_NAME, "warming": None}
 
     # ----- the child -----
@@ -279,6 +281,7 @@ class Engine:
         threading.Thread(target=self._read_child, args=(self.child,), daemon=True).start()
         threading.Thread(target=self._wait_child, args=(self.child,), daemon=True).start()
         threading.Thread(target=self._ws_loop, args=(self.child,), daemon=True).start()
+        threading.Thread(target=self._bind_check, args=(False,), daemon=True).start()
         self.set_state("starting")
         return True
 
@@ -335,6 +338,9 @@ class Engine:
     def restart_child(self, why):
         log(f"restarting soloist ({why})")
         self.stop_child()
+        self.bound = None
+        if self.state == "audio-unbound":
+            self.state = "starting"
         self.start_child()
 
     # ----- the WebSocket mirror -----
@@ -390,6 +396,7 @@ class Engine:
                 if msg.get("item") and self.pending_uri == (msg["item"] or {}).get("uri"):
                     self.pending_uri = None
                 self._derive_state()
+                self._maybe_bind_check()
             elif t == "track_changed":
                 self.pb["item"] = msg.get("item")
                 self.pb["position"] = {"position_ms": 0, "timestamp_ms": time.time() * 1000,
@@ -398,6 +405,7 @@ class Engine:
                     self.pending_uri = None
             elif t == "playback_changed":
                 self.pb["status"] = msg.get("status") or self.pb["status"]
+                self._maybe_bind_check()
             elif t == "position_sync":
                 self.pb["position"] = msg.get("position") or self.pb["position"]
             elif t == "volume_changed":
@@ -416,15 +424,68 @@ class Engine:
         with self.events:
             return self.evseq
 
+    def _maybe_bind_check(self):
+        """AM-16: Soloist may create its stream lazily on the first play, so
+        the AUTHORITATIVE check runs whenever audio is playing and the
+        binding is not yet proven — one at a time. (Under mirror_lock.)"""
+        if self.pb.get("status") == "playing" and self.bound is not True and not self._binding:
+            self._binding = True
+            threading.Thread(target=self._bind_check, args=(True,), daemon=True).start()
+
     def _derive_state(self):
         if self.state in ("expired", "needs-key"):
             return
         if not self.auth["logged_in"]:
             self.set_state("needs-pair")
-        elif self.node is None:
+        elif self.node is None or self.bound is False:
             self.set_state("audio-unbound")
         else:
             self.set_state("ok")
+
+    def _bind_check(self, authoritative):
+        """AM-16 / bench B9: is the soloist stream linked to the sink we
+        pinned, and nothing else? Informational at start (the stream may
+        not exist yet); AUTHORITATIVE within 2 s of the first playing
+        event — a mis-bound child is paused and killed, and the state is
+        audio-unbound (fail closed, never 'some other sink')."""
+        from vibb import audio
+        try:
+            self._bind_check_body(audio, authoritative)
+        finally:
+            if authoritative:
+                self._binding = False
+
+    def _bind_check_body(self, audio, authoritative):
+        time.sleep(2.0 if authoritative else 0.5)
+        dump = audio.pw_dump()
+        if not dump:
+            return                                  # no graph to ask: unknown
+        streams = [obj for obj in dump
+                   if obj.get("type") == "PipeWire:Interface:Node"
+                   and ((obj.get("info") or {}).get("props") or {}).get("media.class") == "Stream/Output/Audio"
+                   and "soloist" in json.dumps((obj.get("info") or {}).get("props") or {}).lower()]
+        if not streams:
+            self.bound = None if not authoritative else self.bound
+            log("bind check: no soloist stream node yet" + ("" if authoritative else " (lazy?)"))
+            return
+        sinks = set()
+        for s in streams:
+            sinks |= audio._linked_sinks(dump, s["id"])
+        ok = bool(self.node) and sinks == {self.node}
+        self.bound = ok
+        if ok:
+            log(f"bind check: soloist stream on {self.node} OK")
+            with self.mirror_lock:
+                self._derive_state()
+            return
+        log(f"bind check FAILED: stream linked to {sorted(sinks) or 'nothing'}, wanted {self.node}")
+        if authoritative:
+            try:
+                self.cmd("pause")
+            except OSError:
+                pass
+            self.stop_child()
+            self.set_state("audio-unbound")
 
     def wait_event(self, etype, timeout, since=None, pred=None):
         """The first event of type `etype` logged AFTER `since` (a mark()),

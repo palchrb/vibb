@@ -321,4 +321,46 @@ p.terminate(); out = p.communicate(timeout=5)[0]
 assert "restarting in 0.5s" in out, out[-500:]
 print("6. a crash -> offline -> bounded-backoff restart OK")
 
+# 7. AM-16: the bind check. A fake pw-dump on PATH shows the soloist
+#    stream linked (a) to the pinned node -> bound, state ok; (b) to
+#    another sink -> on the first playing event the child is paused,
+#    killed, and the state is audio-unbound (fail closed)
+PWD_FILE = os.path.join(TMP, "pw-dump.json")
+fake_bin = os.path.join(TMP, "fakebin"); os.makedirs(fake_bin, exist_ok=True)
+open(os.path.join(fake_bin, "pw-dump"), "w").write(f"#!/bin/sh\ncat {PWD_FILE}\n")
+os.chmod(os.path.join(fake_bin, "pw-dump"), 0o755)
+
+
+def graph(linked_to):
+    return [{"id": 1, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "vibb_bench_node", "media.class": "Audio/Sink"}}},
+            {"id": 2, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "alsa_output.hdmi", "media.class": "Audio/Sink"}}},
+            {"id": 9, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "soloist", "application.name": "Spotify Soloist", "media.class": "Stream/Output/Audio"}}},
+            {"id": 20, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 9, "input-node-id": linked_to}}]
+
+
+os.environ["PATH"] = fake_bin + ":" + os.environ["PATH"]
+FAKE.status, FAKE.context = "idle", None          # the shared fake: a fresh session
+open(PWD_FILE, "w").write(json.dumps(graph(1)))
+p, base, data = start_sidecar()
+h = wait_state(base, "ok")
+for _ in range(30):
+    if get(base, "/soloist/health")[1]["bound"] is True:
+        break
+    time.sleep(0.1)
+assert get(base, "/soloist/health")[1]["bound"] is True, "linked to the pinned node = bound"
+post(base, "/player/play", {"uri": CTX}); time.sleep(2.6)
+assert get(base, "/soloist/health")[1]["state"] == "ok"
+p.terminate(); p.wait(5)
+open(PWD_FILE, "w").write(json.dumps(graph(2)))            # linked to the HDMI sink instead
+FAKE.status, FAKE.context = "idle", None
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+FAKE.received.clear()
+post(base, "/player/play", {"uri": CTX})
+h = wait_state(base, "audio-unbound", timeout=8)
+assert h["child"] is None and h["bound"] is False, h
+assert any(m["command"] == "pause" for m in FAKE.received), "a mis-bound child is paused before it is killed"
+p.terminate(); p.wait(5)
+print("7. bind check: pinned node -> bound; another sink -> paused, killed, audio-unbound OK")
+
 print("\nall soloist_sidecar checks passed")
