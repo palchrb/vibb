@@ -289,8 +289,9 @@ that updates. Design:
   `soloistd.update()`; both skip whenever `_audible_now`, and on ANY
   wifi otherwise — hotspot included (owner, 2026-09-04: the box does not
   ration the owner's data; 12.8 MB once per build change).
-- **When:** whenever the ETag changed, not only near expiry — a fresh
-  build is a fresh 90 days, and the check is free. Expiry is read from
+- **When:** the CHECK whenever the hook/timer fires (free); the DOWNLOAD
+  only when the installed build nears expiry (AM-55 — superseding the
+  "whenever the ETag changed" first draft). Expiry is read from
   the child's own startup line ("client expires in N days", FIELD
   FINDING #3), surfaced as `/soloist/health.days_left`; below 21 days
   with no successful update the screen warns, below 7 it is red, and
@@ -381,6 +382,7 @@ The full pass is Appendix D. What it changed, by ID:
 | AM-51 | **crc32c settled — full-object, and the code is 15 lines.** Downloaded the 12.8 MB archive once (2026-09-04): a table-driven CRC-32C (reflected 0x82F63B78, check value 0xE3069283) over the whole file equals `x-amz-checksum-crc32c` exactly (`IrqQuw==`), so it is NOT a composite multipart checksum; 1.6 s on the dev box, ~15 s on a Zero, run nice-19. Archive members: `soloist`, `CHANGELOG.md`, `THIRD_PARTY_LICENSES.txt`. |
 | AM-52 | **"Idle" for the post-update restart** = no track OR paused ≥ 10 min, AND not audible, AND no hands on the box; a paused session may be restarted because the bookmarker flushed on pause and `play()`'s resume falls through to the bookmark; mark with `note_go_restart()`; never on the poweroff path; if the new child fails N starts, swap `soloist.prev` back automatically. |
 | AM-53 | **Engine toggle wiring:** a read-only `audio_stack_peek` (env > file > bluealsa, no write) for the refuse; the engine file written AFTER `audio_stack_apply` succeeds; `VIBB_GO_CONFIG` UNSET on the daemon under soloist (else the supervisor's zeroconf lock rewrites go-librespot's config and restarts the soloist unit every tick); `VIBB_GO_API`/`VIBB_GO_UNIT` on daemon, bt-reconnect, idle, buttons, rfid; `extra.sh` derives the engine unit from `/etc/vibb/spotify-engine`; the sidecar PERSISTS the exit-10 latch (the supervisor's park/unpark starts and stops the unit); the seam pin's allowlist becomes `{install.sh, spotify-engine.sh}`. |
+| AM-55 | **Download only near expiry (owner, 2026-09-04).** D1 said "whenever the ETag changed"; Spotify rebuilds roughly daily (bygg `20260901` on the bench, the CDN archive dated 4 Sep 06:09 the same morning it was probed), so that pulled 12.8 MB most days for functionally identical builds. Now: the CHECK stays free and frequent (idle-shutdown + every 6 h), the DOWNLOAD happens only when the installed build has ≤ `VIBB_SOLOIST_UPDATE_DAYS_LEFT` (30) days left per the sidecar's `/soloist/health.days_left`, or is expired/latched, or its expiry is unknown, or `--force`. Otherwise the run records what is available (`state.available`) and answers `not-yet`. Net: one download per ~60 days, whatever Spotify's cadence. |
 | AM-54 | **Volume shroud recovery:** a sidecar dying mid-walk leaves Connect volume at 0; `_apply_box_volume` heals on the next tap, and the sidecar restores on its own start. |
 
 ### Branch state, 2026-09-04 evening (36 commits over `main`, suite 176 files green)

@@ -52,6 +52,13 @@ STATE_FILE = os.environ.get("VIBB_SOLOIST_UPDATE_STATE",
 SIDECAR = os.environ.get("VIBB_GO_API", "http://127.0.0.1:3688")
 DAEMON_URL = os.environ.get("VIBB_DAEMON", "http://127.0.0.1:3678")
 BUDGET_S = float(os.environ.get("VIBB_SOLOIST_UPDATE_BUDGET_S", "120"))
+# Spotify rebuilds roughly daily; every build is functionally the same one
+# for this box, so "download whenever the ETag changed" would pull 12.8 MB
+# most days for nothing (owner, 2026-09-04). The CHECK stays free and
+# frequent; the DOWNLOAD happens only when the installed build is getting
+# close to its 90-day expiry — or when there is nothing installed, the
+# installed one is expired/latched, or its age is unknown.
+DOWNLOAD_WHEN_DAYS_LEFT = int(os.environ.get("VIBB_SOLOIST_UPDATE_DAYS_LEFT", "30"))
 UA = "vibb-soloist-update/1"
 
 
@@ -226,6 +233,32 @@ def _busy():
         return False
 
 
+def _installed_days_left():
+    """How many days the INSTALLED build has left, from the sidecar's own
+    reading of the child's startup line; None when nobody can tell."""
+    try:
+        with urllib.request.urlopen(SIDECAR + "/soloist/health", timeout=5) as r:
+            h = json.loads(r.read() or b"{}")
+        if h.get("state") == "expired":
+            return 0
+        d = h.get("days_left")
+        return int(d) if d is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _needs_download(new, st, dest):
+    """A new build is on the CDN: is it worth 12.8 MB NOW?"""
+    if not os.path.exists(dest):
+        return True, "no binary installed"
+    days = _installed_days_left()
+    if days is None:
+        return True, "installed build's expiry unknown"
+    if days <= DOWNLOAD_WHEN_DAYS_LEFT:
+        return True, f"installed build expires in {days} days"
+    return False, f"installed build has {days} days left — not worth the download yet"
+
+
 def _notify_sidecar():
     """AM-52: the sidecar decides when to restart the child (idle only,
     never on the poweroff path) and clears the exit-10 latch — a fresh
@@ -271,6 +304,13 @@ def update(url=URL, dest=BIN, budget_s=BUDGET_S, force=False):
         _save({**st, "checked_at": time.time()})
         return {"result": "current", "etag": st.get("etag")}
     log(f"new build: etag {new['etag']} {new['length']} bytes crc32c={new['crc32c']}")
+    if not force:
+        want, why = _needs_download(new, st, dest)
+        if not want:
+            log(f"skipping the download: {why}")
+            _save({**st, "checked_at": time.time(), "available": new})
+            return {"result": "not-yet", "why": why, "etag": new["etag"]}
+        log(f"downloading: {why}")
     try:
         if not fetch(url, tmp, new, deadline):
             _save({**st, "pending": new, "at": time.time()})
@@ -295,7 +335,7 @@ def update(url=URL, dest=BIN, budget_s=BUDGET_S, force=False):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     r = update(force="--force" in argv)
-    return 0 if r["result"] in ("current", "updated", "deferred", "skipped") else 1
+    return 0 if r["result"] in ("current", "updated", "deferred", "skipped", "not-yet") else 1
 
 
 if __name__ == "__main__":

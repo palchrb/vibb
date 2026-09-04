@@ -93,9 +93,17 @@ URL = f"http://127.0.0.1:{srv.server_address[1]}/soloist_release_arm64.tar.gz"
 NOTIFIED = []
 
 
+HEALTH = {"state": "ok", "days_left": 12}
+
+
 class Side(BaseHTTPRequestHandler):
     def do_POST(self):
         NOTIFIED.append(self.path); self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+
+    def do_GET(self):
+        out = json.dumps(HEALTH).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers()
+        self.wfile.write(out)
 
     def log_message(self, *a):
         pass
@@ -166,5 +174,31 @@ U._busy = lambda: False
 U.update(URL, BIN, budget_s=30)
 assert not os.path.exists(stale), "a day-old tmp is cleaned"
 print("6. clock/busy gates skip without touching the network; stale tmp cleaned OK")
+
+# 7. a new build is NOT downloaded while the installed one has plenty of
+#    days left (Spotify rebuilds ~daily; 12.8 MB for nothing) — the check
+#    still runs and records what is available; it IS downloaded when the
+#    installed build nears expiry, is expired, or its expiry is unknown
+CDN["body"], CDN["etag"] = make_archive("5.0"), '"e5"'
+HEALTH.update(state="ok", days_left=61)
+CDN["hits"].clear()
+r = U.update(URL, BIN, budget_s=30)
+assert r["result"] == "not-yet" and "61 days" in r["why"], r
+assert U.state()["etag"] == '"e4"' and U.state()["available"]["etag"] == '"e5"'
+assert len(CDN["hits"]) == 1 and CDN["hits"][0][1] == "bytes=0-0", "only the 1-byte check"
+assert "4.0" in open(BIN).read()
+HEALTH.update(days_left=30)
+r = U.update(URL, BIN, budget_s=30)
+assert r["result"] == "updated" and "5.0" in r["version"], r
+CDN["body"], CDN["etag"] = make_archive("6.0"), '"e6"'
+HEALTH.update(state="expired", days_left=None)
+assert U.update(URL, BIN, budget_s=30)["result"] == "updated", "an expired build always updates"
+CDN["body"], CDN["etag"] = make_archive("7.0"), '"e7"'
+HEALTH.update(state="ok", days_left=None)
+assert U.update(URL, BIN, budget_s=30)["result"] == "updated", "unknown expiry: safe side"
+CDN["body"], CDN["etag"] = make_archive("8.0"), '"e8"'
+HEALTH.update(days_left=80)
+assert U.update(URL, BIN, budget_s=30, force=True)["result"] == "updated", "--force ignores the threshold"
+print("7. download only near expiry (or expired/unknown/forced); the check stays free OK")
 
 print("\nall soloist_updater checks passed")
