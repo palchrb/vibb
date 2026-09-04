@@ -357,6 +357,43 @@ exhausted, with the resume-walk's volume shroud; the cache canary's
 ledger records what was warmed so a swap (D1) can re-warm the same
 list if the cache turns out to be voided by a build change.
 
+### QA pass on D1–D3 (2026-09-04) — amendments applied
+
+The full pass is Appendix D. What it changed, by ID:
+
+| ID | Amendment |
+|---|---|
+| AM-36 | **The warm is INVISIBLE in the dialect.** While warming, soloistd's `/status` returns the frozen pre-warm snapshot (track, paused/stopped, position, `play_origin` unchanged); the warm shows only on `/soloist/health.warming`. Otherwise `_spotify_bookmarker` writes the warm's track under the KID's context (bookmark poison: the next tap walks for a uri that is not in that context) and — with any non-box origin value — `_arbiter` reads the warm as a phone takeover and stops the podcast. A warm origin cannot be a `play_origin` value; both consumers treat non-box as phone. |
+| AM-37 | **The daemon's sweeper drives the warm, not the sidecar.** `/run/vibb-radio-busy`/paging markers are root-owned and soloistd runs as `$RUN_USER`, so a sidecar "yielding like the sweep" silently no-ops. The sweeper already wakes on `/library` save (`_sync_wake`), coalesces bursts, re-checks `_busy()` per entry and POSTs `/cache/download {uri}` — under soloist that POST IS the warm, and the sweeper touches BUSY every ≤10 s while it runs and POSTs an abort when audible flips. `wait_paging_clear()` before the first play. |
+| AM-38 | **Gate = `not (_audible_now() and _streaming_now())`**, not "no A2DP". A CACHED podcast on the HAT may run under a warm; a STREAMED one may not (the warm fetches at ~250× realtime; that is the "pausing a song a two-minute fight" load). Connected-but-idle headset with no audio is allowed (the crash memory ties no crash to idle-ACL + wifi). |
+| AM-39 | **Paging under a warm.** With the speaker absent btwatchd's 120 s starvation belt pages through any warm — "BT paging + wifi", the thrice-observed flap. A `vibb-warming` marker suspends the belt (a page during a warm has nothing to gain); the marker is bounded like the warm. |
+| AM-40 | **Paused ≥ 10 min before a session is warm-eligible.** A warm over a loaded-but-paused kid session turns the next unpause into a resume walk (seconds, shroud race) instead of a 60 ms resume — the backup's own "resumes any second" rule. |
+| AM-41 | **Stop condition = autoplay.** After each `track_changed`, `get_queue limit=1`; stop when the item's `source == "autoplay"` or `upcoming` is empty — otherwise a 30-track playlist warms Spotify's radio forever. Not in the plan before; the field is in the docs. |
+| AM-42 | **Bounds.** `cache: N` keeps its podcast meaning ("newest N") for soloist entries — a show is 50–150 MB per episode and would LRU-evict the kid's own warm; a byte budget per pass from `spotify_cache_gb`; pacing ≥ 3 s/item, ≤ 100 items per pass, the rest at the next sweep; ≤ 20 min per pass, smaller on battery (`plugged_cached()`). |
+| AM-43 | **Idempotence from a LEDGER, not `/cache/snapshot`.** `_precache_due` fails OPEN when `GET /cache/snapshot` is absent → every sweep and every PWA save would re-walk every playlist. soloistd answers `/cache/download` idempotently from its own ledger (warmed uris + count + build id + "aborted at index k"); `/cache/snapshot` stays 404. The ledger also drives the re-warm after a binary swap (D1). |
+| AM-44 | **idle.py hold is BOUNDED.** An invisible warm reads as idle → poweroff kills it mid-walk; a visible one holds the box awake forever. `/status.warming: true` while it runs, and idle.py treats it like `ssh_active`: a hold with a hard release at the pass budget. |
+| AM-45 | **`cache` default under soloist.** Today `cache` defaults to 0 (opt-in per entry). Owner's stated intent ("warm the moment I add something") → `normalize_library` defaults Spotify entries to `cache: 1` when the engine file says soloist; the PWA toggle still turns it off per entry. |
+| AM-46 | **D2 wording corrected.** Soloist takes the key ONLY as `-k` (no env var, no file: the CLI reference), so it IS visible in the CHILD's `/proc/<pid>/cmdline` to any local login for the process's lifetime — the same class as go-librespot's `credentials.json` being readable by `$RUN_USER`. Honest statement: never in a unit file, the journal, or the daemon's argv. Mitigation on the box: `hidepid=invisible` on `/proc` (a mount drop-in). The file is `soloist.env` (`KEY=VALUE`, for `EnvironmentFile=`), not `.json`. |
+| AM-47 | **Key validation is asynchronous** (the unit reads `EnvironmentFile` at start): write prev, write new, restart the unit, answer 202; the PWA polls `/soloist/health`, which must tell three "no"s apart from the child's own output — exit 10 → `expired`; the auth-failure line → `bad-key` (restore prev, restart again); no network → `offline` (keep the key). Which log line means bad-key is NOT in the docs: bench it once with a mangled key. |
+| AM-48 | **`spotify_state` string in `/status`** (`ok|offline|needs-key|needs-pair|expired|audio-unbound`), the bool kept for the PWA; `play()` fast-fails on any non-ok state (`{"error": "spotify-needs-key"}` — the UI already routes that class) instead of spawning a player that waits 30 s for `username` and exits; the popup renders when the TAPPED source is spotify, not only the current one. And the sidecar's `/status` synthesizes `username` (Soloist's `auth_state` has none) or `play_spotify` dies at its session wait every time. |
+| AM-49 | **Backup:** `VIBB_SOLOIST_ENV` (the key) and `VIBB_SOLOIST_DATA` (the `--data-dir`: session, ws files) into the SECRET tier via env paths like the rest; the `-C` cache dir excluded. A restored session is "probably valid"; `needs-pair` is the graceful failure on a new box. |
+| AM-50 | **Updater shares the shutdown slot in order:** backup first (irreplaceable), then the updater, each with its own unit and budget, sum < the 600 s marker window; download resumable with `Range:` (the CDN advertises `accept-ranges`); stale `*.tmp` deleted first; a tmp is trusted only with its stored ETag+length. Timer: MONOTONIC (`OnBootSec=15min` + `OnUnitActiveSec=6h`) like the backup — a persisted calendar timer fires at boot on the RTC-less bogus clock, inside the radio storm, with TLS failing against 1970; gated on `clock_trusted()` and `_audible_now`. |
+| AM-51 | **crc32c settled — full-object, and the code is 15 lines.** Downloaded the 12.8 MB archive once (2026-09-04): a table-driven CRC-32C (reflected 0x82F63B78, check value 0xE3069283) over the whole file equals `x-amz-checksum-crc32c` exactly (`IrqQuw==`), so it is NOT a composite multipart checksum; 1.6 s on the dev box, ~15 s on a Zero, run nice-19. Archive members: `soloist`, `CHANGELOG.md`, `THIRD_PARTY_LICENSES.txt`. |
+| AM-52 | **"Idle" for the post-update restart** = no track OR paused ≥ 10 min, AND not audible, AND no hands on the box; a paused session may be restarted because the bookmarker flushed on pause and `play()`'s resume falls through to the bookmark; mark with `note_go_restart()`; never on the poweroff path; if the new child fails N starts, swap `soloist.prev` back automatically. |
+| AM-53 | **Engine toggle wiring:** a read-only `audio_stack_peek` (env > file > bluealsa, no write) for the refuse; the engine file written AFTER `audio_stack_apply` succeeds; `VIBB_GO_CONFIG` UNSET on the daemon under soloist (else the supervisor's zeroconf lock rewrites go-librespot's config and restarts the soloist unit every tick); `VIBB_GO_API`/`VIBB_GO_UNIT` on daemon, bt-reconnect, idle, buttons, rfid; `extra.sh` derives the engine unit from `/etc/vibb/spotify-engine`; the sidecar PERSISTS the exit-10 latch (the supervisor's park/unpark starts and stops the unit); the seam pin's allowlist becomes `{install.sh, spotify-engine.sh}`. |
+| AM-54 | **Volume shroud recovery:** a sidecar dying mid-walk leaves Connect volume at 0; `_apply_box_volume` heals on the next tap, and the sidecar restores on its own start. |
+
+**Owed to the bench before warming is coded (QA item 5):** does a
+`skip_next`/`pause` CANCEL the in-flight fetch (then "2 s per item" is
+too short and the ledger marks an item warm only when its cache file
+stops growing), and is a truncated file served partial on replay or
+re-fetched? Two additions to `bench/soloist_spike.py`.
+
+**Go/no-go (QA):** GO for step 3 now; the sidecar's core (supervision,
+persisted latch, health states, WS client, dialect `/status` and
+`/player/*`, the walk, the binding) may be written against the fake WS
+server now; warming waits for the bench fact above.
+
 ---
 
 # PART 1 — Architect design (2026-09-02), with QA-2 marks
@@ -1648,3 +1685,152 @@ Invariant stated per commit as **P:** suite green + production box (stack unset/
 14. **docs: PLAN amendments AM-24..AM-31 from this pass** (a-k above), the K-table and `audio.py` signature block corrected, §A/§B marked "rig is the source", the verify-tag status table from finding i. **P:** docs only.
 
 Field test on the spare Zero starts after commit 10 (platform complete, self-test still absent); commits 11-13 land before the ≥14-day soak begins. soloistd (Phase 3) follows and is out of scope here.
+
+---
+
+# APPENDIX D — QA pass on the Phase 3 decisions D1–D3 (verbatim, 2026-09-04, tree at d0ce095)
+
+Scope respected: the soloistd design (dialect sidecar, exit-10 latch, walk, 80-window, whole-file cache) is taken as settled. Everything below is about how D1–D3 sit on the real code.
+
+---
+
+## D3 — warming on library ADD
+
+### 1. Preemption / bookmark poison / play_origin — **NEEDS-CHANGE**
+
+**Evidence.**
+- The abort itself is free: every kid action reaches the engine through the dialect (`daemon.py:2304-2325 _spot_control` → `spotify_command`; `player.py:220-330 play_spotify` → `/player/play {uri, skip_to_uri, position}`). The sidecar can abort the walk on *any* inbound dialect command with no daemon change — as long as it serializes "abort walk → restore → execute the command" under its single lock. That is the "lands at the right track" guarantee; nothing in the daemon has to know a warm existed.
+- **Bookmark poison is real** if the warm is visible in `/status`. `_spotify_bookmarker` (`daemon.py:4649-4714`) computes `context = to_uri(ORCH.target)` whenever `ORCH.source == "spotify"` (`:4690-4692`) — i.e. the *last thing the kid tapped*, still true while the box sits idle/paused — and `spotify.bookmark_step` (`spotify.py:236-260`) writes `{context_uri: <kid's X>, uri: <warm's track from Y>}` whenever the status shows a playing track with origin in `("go-librespot","",None)`. Result: X's bookmark points at a track not in X; the next tap does `skip_to_uri` for a uri the walk can never find → worst case a full-context walk. It is also the `_SPOT_LAST_PLAYING`/shutdown snapshot (`:4672-4677`).
+- **The opposite choice (a non-box origin for warm tracks) kills the podcast D3 explicitly allows.** `_arbiter` (`daemon.py:447-486`): `source == "mpv" and mpv alive and spotify_playing(st) and origin not in ("go-librespot","",None)` → `"spotify took over (phone) — yielding mpv"` → `_stop_child()`. A warm during a HAT podcast with any third origin value is a phone takeover to the arbiter. Same test at `:1893` (output-switch resume) and `spotify.py:249`.
+- So a "warm origin" marker cannot be a play_origin *value*: both consumers interpret non-box as phone.
+
+**Minimal fix.** The warm must be **invisible to the dialect**: while warming, the sidecar's `/status` returns a frozen pre-warm snapshot (track/paused/stopped/position as they were, `play_origin` unchanged) and exposes the warm only on `/soloist/health {warming: {uri, idx, n}}`. Then `bookmark_step` sees the paused/stopped pre-warm state → writes nothing (`spotify.py:247`), the arbiter sees no playing session, `_audible_now` reads False (the warm *is* the sweeper's job, see #3). Add the origin question to the contract test: `soloist_contract.py` must pin "status during warm == status before warm".
+
+Also: D3 says warming may run while the kid is **paused**. On resume the daemon's shortcut (`daemon.py:909-921`) calls `/player/resume` expecting an unpause; the sidecar then has to run the *resume walk* back to the kid's track (N skips + shroud, seconds) instead of a 60 ms unpause, and if the walk's `pause` loses the race (PLAN-soloistd "0.38 s WAS faintly audible") the kid hears a stranger's track. **Recommend:** a loaded-but-paused session is *not* warm-eligible until paused ≥ 10 min (the backup's own "resumes any second" rule, `backup.py:736-770`).
+
+### 2. "No active A2DP" as the only gate vs the crash memory — **NEEDS-CHANGE**
+
+**Evidence.**
+- The sweep's gate is `_audible_now` (`daemon.py:5840-5873`, installed at `:5876`): it is **not** an A2DP gate — it holds for mpv unpaused on *any* output, for sonos, and for a busy engine API. Its stated reason (`library.py:262-270`) is the Spotify **stream** and the offline prober, not only the A2DP link. D3's "podcast on the HAT while warm runs, wifi is free" drops that rule: a HAT podcast streamed from a URL plus a warm fetching at "~250× realtime" (PLAN-soloistd cache verdict) is exactly the "pausing a song a two-minute fight" load (`library.py:266`). A *cached* podcast on the HAT is fine; a *streamed* one is not. Gate: `not (_audible_now() and _streaming_now())` — i.e. allow the warm only when what plays is local/cached (`_streaming_now`, `daemon.py:5636-5669`, already distinguishes URL mpv from file mpv).
+- **Connected-but-idle headset:** `bt_connected` = `_bt_transport_ready()` = `btbus.a2dp_transport_present` which counts *any* transport state, idle included (`btbus.py:406-430`; `daemon.py:3048`). The backup treats that as busy (`backup.py:772-773`) unless poweroff-imminent. For the warm it is "not active A2DP" and the crash memory does **not** tie idle-ACL+wifi to a crash — the three observed patterns are disconnected scan loops during A2DP, paging + wifi, and the AVRCP storm (`vibb-bt-crash.md` 2026-08-13 entries). So heavy wifi on an idle link is defensible. Under pipewire the transport also releases after 120 s paused (`audio-stack.sh` bluez rule `session.suspend-timeout-seconds = 120`).
+- **The pattern D3 re-creates is paging, not streaming:** headset OFF (car trip on the phone's hotspot — D3's own motivating case) → btwatchd blind-pages on its backoff. It defers while `radio.busy()` is fresh (`btwatchd.py:391`, `radio.py:BUSY_TTL_S=20`), but the starvation belt `YIELD_GIVEUP_S=120` (`btwatchd.py:114,386-389`) pages anyway after 2 min. A 25-minute warm therefore guarantees "BT paging + wifi" — the thrice-observed flap pattern — every backoff cycle. And the sidecar **cannot** even keep BUSY fresh: `/run/vibb-radio-busy` is created by root vibbd (`radio.py:44-50`, no chmod; `/run` root 755) and soloistd runs as `$RUN_USER` (§I) — its `_touch` fails silently by design.
+
+**Minimal fix.** (i) The warm is driven from the daemon's sweeper thread (it already fires on library save, `daemon.py:3582`), which touches BUSY every 10 s while polling the warm and POSTs an abort when `_busy()` flips — the markers stay where root can write them. (ii) Add "speaker configured and absent" to the gate, or teach btwatchd a `vibb-warming` marker that suspends the starvation belt (a page during a warm has nothing to gain: nobody asked for sound). (iii) `wait_paging_clear()` before the first `play`, like `player.py:230`.
+
+### 3. The trigger and "which entries are new" — **CONFIRMED-OK with two corrections**
+
+**Evidence.** The hook already exists and needs no new code: `/library` POST (`daemon.py:3565-3583`) saves under `LIB_LOCK` then `_sync_wake.set()` outside it; the sweeper (`library.py:511-660`) coalesces bursts (`SYNC_SETTLE_S`), re-checks `_busy()` per entry, and the spotify branch (`:544-570`) posts `/cache/download {uri}` for every entry with `cache != 0` whose `_precache_due(uri)` is True. Under soloist the sidecar implements `/cache/download` as the walk. Offline-at-add: `_precache_done` is only stamped on success (`:566`), so the next 6 h sweep (`SYNC_INTERVAL_S`) retries — "entries added while offline" is covered by construction.
+
+Two corrections:
+- **`_precache_due` fails open** (`library.py:403-418`): playlists gate on `spotify.snapshot(uri)` = `GET /cache/snapshot` (`spotify.py:51-60`), a fork endpoint. If the sidecar does not implement it, `snap` is None → `return True` → **every sweep and every library save re-walks every playlist** (a 500-track walk 4×/day plus each PWA edit). The sidecar must either serve `/cache/snapshot` (needs the Web API or a stable hash of the first-80 queue) or make `/cache/download` idempotent from its own ledger (warmed uris + item count + build id — the canary's ledger, `bench/soloist_cache_canary.py`). The ledger is the better answer: it also records "aborted at index k" for the retry.
+- **`cache` defaults to 0** (`library.py:79`, PWA `app.js:524` "no pre-cache"/"pre-cache"). "The moment an entry is saved, warm it" is only true if the parent toggles pre-cache on. OWNER QUESTION: should `normalize_library` default spotify entries to `cache: 1` when the engine file says soloist (a one-line install-time-engine read), or is opt-in the intent?
+
+### 4. Scale, end-of-context, battery, idle.py — **NEEDS-CHANGE**
+
+- **Reaching the end:** the 80-window does not limit *skipping* (kill 2: "resume walk UNAFFECTED — sliding window"). What stops the walk at the end is unaddressed: Spotify continues into autoplay, and the docs give the field for it — `get_queue` entries carry `source: context | queue | autoplay` (websocket-api reference, fetched today). Rule: after each `track_changed`, `get_queue{limit:1}`; stop when the current/upcoming item's `source == "autoplay"` or `upcoming` is empty. Without this a warm of a 30-track playlist caches Spotify's radio forever. P2's Web API listing gives an exact count but is not required for stopping.
+- **Bound the walk by `cache: N` and bytes.** For a **show**, `play show` + skip walks every episode at 50–150 MB each (91 MB from one episode on the bench); a 200-episode show is 10–20 GB into a `-z` cap — LRU eviction of the kid's just-warmed content. `cache: N` already means "newest N" for podcasts (`library.py:80`, `:546`); apply the same meaning to soloist entries, and cap a single warm pass at a byte budget read from `spotify_cache_gb` (`app.js:929`).
+- **idle.py:** if the warm is invisible in `/status` (fix #1), `daemon_playing()` (`idle.py:70-75`) reads False and `_cycle` (`:160-180`) counts idle → a 25-min warm on a 5-min timeout is **killed by poweroff** mid-walk. If visible, it holds the box awake indefinitely. The plan's "warming-marker so idle.py does not read it as kid-activity" has the sign wrong: the warm *needs* a bounded hold. Minimal: the warm has its own budget (e.g. ≤ 20 min per pass), and while it runs the daemon's `/status` exposes `warming: true`; idle.py treats it like ssh (`ssh_active`, `:96-150`): a hold with a hard release, never an unbounded one. Battery: BUSY forces wifi PS off (`_streaming_now`, `daemon.py:5649`) for the whole walk — that is the +30–50 mA the governor exists to avoid; on battery with no charger gate this is the owner's call, but the per-pass budget should be smaller on battery (`plugged_cached()` is already there, `:5802`).
+
+### 5. Abort semantics and the half-fetched file — **OPEN-QUESTION-FOR-OWNER (bench)**
+
+Nothing in the plan or spike measured what a `skip_next`/`pause` does to an in-flight fetch. Two unknowns that decide the ledger design: (a) does Soloist *cancel* the previous track's fetch on skip (then "2 s per item" is too short for whole-file — the walk must wait until the cache file stops growing, not until `track_changed`+2 s); (b) is a truncated file served partial later (stall at the truncation point) or re-fetched? Bench items to add to `soloist_spike.py`: fetch-completes-after-skip (watch the cache dir per item), and abort-mid-fetch → net down → replay. Until then the ledger marks an item warm only when its file size is stable for 2 s and roughly `duration × ~20 kB/s`.
+
+### 6. History pollution / skip storms / pacing — **OPEN-QUESTION (accepted risk, needs a cap)**
+
+A warm is the mash shape (kill 4: 60 skips/min, zero errors, one minute) stretched to 25 min at ~20/min. The documented API says nothing about limits (websocket-api fetched today: no rate-limit text); the residual is the "delayed account cooldown" the spike could not observe. Minimal pacing: ≥ 3 s/item (a third of the tested rate), ≤ 100 items per pass, continue at the next sweep; the ledger makes the resumption free. Play-history: accepted by the owner; note the Connect side effect — the phone app shows the box "playing" at volume 0 for the whole walk.
+
+---
+
+## D2 — API key via PWA
+
+### 7. `/soloist/configure` vs the backup pattern; the `-k` argv claim — **NEEDS-CHANGE (the statement is false as written)**
+
+**Pattern that carries over** (`daemon.py:3785-3795`, `backup.py:434-489`): default-deny (not in `SAFE`, `:4045`), JSON content-type gate (`:3523-3548`, pinned by `api_csrf_content_type.py`), `_write_secret` 0600 tmp+fsync+`os.replace` (`backup.py:606-623`), previous bytes restored on failure (`:463-487`).
+
+**What is different:** backup validates *before* committing by running rclone/restic against the written files. The key can only be validated by the child, which needs a restart (the unit's `EnvironmentFile=` is read by PID 1 at start — the running sidecar cannot see a rewritten file). So the POST cannot be synchronous-validated. Shape: write `prev`, write new, `systemctl restart vibb-soloistd`, return 202; the PWA polls `/soloist/health`, which must distinguish **three "no"s** the sidecar can tell apart only by the child's own output: exit 10 / "expired" line → `expired`; auth failure line → `bad-key` (restore `prev`, restart again); no network → `offline` (keep the key, `_SPOT_OFFLINE` semantics). Which exact log line means "bad key" is **not in the docs** — bench it once with a mangled key.
+
+**The argv claim.** The CLI reference lists only `-k, --api-key KEY` — no env var, no file (fetched today). The auth page's `--api-key "$SOLOIST_API_KEY"` is shell expansion, not env support; the same page warns "treat shell history, **process-manager configuration**, screenshots, and logs containing the command as sensitive". A wrapper doing `exec soloist -k "$KEY"` puts the key in the **child's** `/proc/<pid>/cmdline`, world-readable by default. Honest statement for the doc: *"never in a unit file, the journal, or the daemon's argv; it IS visible in the child's cmdline to any local login for the process's lifetime (same class as go-librespot's credentials.json being readable by $RUN_USER)."* Mitigation available without Soloist's help: `hidepid=invisible` on `/proc` (a `/proc` remount in a `.mount` drop-in, or `ProtectProc=invisible` only protects other units' views — not a shell). Note also EnvironmentFile needs `KEY=VALUE`, so the file is `soloist.env`, not `soloist.json` — D2 names the wrong shape.
+
+### 8. `needs-key` vs the offline popup / bedtime rule — **NEEDS-CHANGE**
+
+`_SPOT_OFFLINE` is a bool (`daemon.py:203`), surfaced as `spotify_offline` (`:2638`); the screen slot exists (`ui.py:3560-3580`, the rounded popup with an X action at `:2032-2035`) **but only when `source == "spotify"`**. A never-paired/never-keyed box has source None/mpv → nothing shows. And a tap on a Spotify tile goes `_ensure_spotify_backend` (`:745-768`, unit active → True) → spawns `player.py` → waits 30 s for `username` (`player.py:262-267`) → `exit 1` → 30 s of dead box: exactly the bedtime failure. Minimal: (i) `/status` grows a string `spotify_state: ok|offline|needs-key|needs-pair|expired|audio-unbound`, keep the bool for the PWA; (ii) `play()` fast-fails on any non-`ok` state the way it does for `no-internet` (`:930-936`), returning `{"error": "spotify-needs-key"}` — the UI already routes that class (`ui.py:2837`); (iii) the popup renders when the *tapped* source is spotify or the state is non-ok, not only when the current source is. Also the sidecar's dialect `/status` must synthesize `username` (the plan says auth_state has no username, PLAN-soloistd:244) or `play_spotify` dies at `:262-267` every time — pin it.
+
+### 9. Backup SECRET tier — **NEEDS-CHANGE / OPEN**
+
+`backup.py:36-70` reads paths from env, never literal names ("a literal … here would silently back up nothing"); go-librespot's `credentials.json`+`state.json` come from `VIBB_GO_CONFIG`'s dir. Add `VIBB_SOLOIST_ENV` (the key) and `VIBB_SOLOIST_DATA` (the `--data-dir`: the stored session, `ws.addr/ws.port`, `cache/Users/<id>-user`) — **exclude** anything under the cache dir (`-C`, GBs). Portability: the docs say "keep the same data directory if you want the device to stay paired" and say nothing about machine binding — treat a restored session as *probably* valid, and make `needs-pair` (item 8) the graceful failure, so a restore onto a new box degrades to one PWA pairing step, never a silent box. The restore path reboots (`daemon.py:3838-3860`), so the sidecar re-reads everything.
+
+---
+
+## D1 — updater
+
+### 10. Sharing the idle-shutdown slot; poweroff mid-download; the timer — **NEEDS-CHANGE**
+
+- `_backup_before_off` (`idle.py:186-220`) stamps `poweroff-imminent` and runs `systemctl start --wait vibb-backup.service` with `timeout=BACKUP_MAX_S=180`; the marker's freshness window is 600 s (`backup.py:720-733`). Two jobs: run **backup first** (irreplaceable), updater second, each with its own budget, sum < 600 s so the marker still holds for the second; give the updater its own unit for the same cgroup reason the backup has one (`idle.py:189-196`, `install.sh:980-1010`). 12.8 MB on a bad hotspot can exceed 120 s — cap and let the *timer* path finish it (resume with `Range:` — the CDN advertises `accept-ranges: bytes`).
+- Poweroff mid-file: tmp under the binary's dir + crc32c + `--version` + `os.replace` is safe *provided* the next run deletes stale `*.tmp` first and never trusts a tmp without a stored ETag/length pair. Replacing a running binary by rename is fine (old inode stays mapped; crashpad's `/proc/self/exe` re-exec resolves to the old inode).
+- **Timer:** `Persistent=` applies only to `OnCalendar=` (correct), and on an RTC-less Zero a persisted calendar timer fires **at boot on a bogus clock** — mid-boot, inside the radio storm the supervisor's 180 s `park_grace` exists for (`daemon.py:5334-5342`), and TLS to the CDN fails against a 1970 clock (the very reason go-librespot orders after `vibb-rtc`, `install.sh:596-598`). Do what the backup does: monotonic `OnBootSec=15min` + `OnUnitActiveSec=6h`, cadence in code, gated on `clock_trusted()` and `_audible_now` (`backup.py:790-805`). Since the check is one 1-byte round trip, 6 h is cheap and the "weekly" net becomes "within 6 h of the next clean-clock idle moment".
+
+### 11. crc32c — **CONFIRMED (not stdlib) + one blocker question**
+
+`zlib.crc32(b"123456789") == 0xCBF43926` (ISO-HDLC); CRC-32C's check value is `0xE3069283`. Verified today: a 256-entry table over reflected polynomial `0x82F63B78`, init/xorout `0xFFFFFFFF`, `crc = T[(crc ^ b) & 0xFF] ^ (crc >> 8)` per byte, yields `0xE3069283`; the header compares as `base64(crc.to_bytes(4, "big"))` (= `4waSgw==` for the check string). Pure-Python over 12.8 MB is ~10 s on a Zero 2 W — acceptable once per build, run nice-19.
+
+**Blocker to verify on the bench:** S3 `x-amz-checksum-crc32c` on a **multipart** upload is a *composite* checksum with a `-N` suffix (checksum-of-part-checksums), and a 12.8 MB object is above the usual 8 MB multipart threshold. The owner verified the header *exists*, not that it *matches* a full-object CRC. Look at `x-amz-checksum-type` (FULL_OBJECT vs COMPOSITE) and the value's suffix. If composite: verify `content-length` + gzip/tar integrity + `--version` instead, or reconstruct the composite (part size is not advertised — do not).
+
+### 12. "Restart the child only if idle" — **NEEDS-CHANGE (define it)**
+
+Idle = sidecar `/status` shows no track **or** paused for ≥ 10 min, AND `_audible_now()` False, AND `_hands_on_box()` False (`backup.py:707-717`). Restarting a *paused* session is acceptable **because** the bookmarker flushes on pause (`daemon.py:4700-4712`) and `play()`'s resume shortcut falls through to a bookmark respawn when the session is empty (`:909-921` → `_spawn`); mark it with `note_go_restart()` so the ip watchdog does not double-restart (`:3105-3110`). On the poweroff path skip the restart entirely — the box is going down. After an update, if the new child fails to start N times, swap `soloist.prev` back automatically; that is the only rollback that matters.
+
+### 13. Terms — **CONFIRMED-OK**
+
+Fetched today: downloads-and-updates says "Do not redistribute Spotify Soloist archives or binaries directly. Link users to this page instead." and describes updating as "download the archive for the same architecture, replace the installed `soloist` executable, and restart the daemon." No text on automated/scripted downloads; the box fetching its own copy from the documented URL is the documented procedure. The API-key page prohibits *sharing keys*, not automation.
+
+---
+
+## Engine toggle (step 3)
+
+### 14. `spotify-engine.sh` vs `audio-stack.sh` — **NEEDS-CHANGE (four concrete points)**
+
+- **Resolution order:** the engine resolves at `install.sh:64-82`, *before* `audio_stack_resolve` at `:180` — and `audio_stack_resolve` **writes** `/etc/vibb/audio-stack` (`audio-stack.sh:52-53`), so "refuse soloist before anything is touched" cannot reuse it. Add a read-only `audio_stack_peek` (env > file > bluealsa, no write) to `audio-stack.sh` and call it from the engine refuse. Rollback `--librespot` must not touch `config.yml` — but note the daemon still reads it under soloist (`VIBB_GO_CONFIG` on the daemon unit, `install.sh:1233`): the supervisor's `_spotify.lock()` (`daemon.py:5313`, `spotify.py:145-153`) would read go-librespot's `zeroconf_enabled` and, if the sidecar's status reports a username, **rewrite go-librespot's config.yml and restart the soloist unit** every tick. Under soloist `VIBB_GO_CONFIG` must be unset (then `_conf_dir()` is "" and `lock()`/`logout()`/`logged_in_user()` all no-op cleanly, `spotify.py:78-96,156-163`).
+- **Which units get `VIBB_GO_API`/`VIBB_GO_UNIT`:** everything that imports `vibb.spotify` or calls `go_unit_cmd` — daemon (player inherits via `Popen`, `daemon.py:817`), bt-reconnect (`vibb/bt.py`), **idle** (`idle.py:161` daemon-down fallback; its unit has no env, `install.sh:1183-1195`), **buttons** (`buttons.py:72-76` volume via `spotify.go`), **rfid** (`rfid.py:103`), mpris only if it reads status. Today `audio_stack_unit_env` is injected into daemon/go-librespot/bt-reconnect only (`install_unit_order.py` item 4); the engine env must reach the extra three or a soloist box has dead volume buttons and a blind idle fallback. Also `extra.sh` RESTORE/HANDOFF names `go-librespot` literally (`extra.sh:41,80,132`); read `/etc/vibb/spotify-engine` there like it reads `audio-stack` (`:47-50`), or `--run` will leave the soloist child alive with a destroyed stream (dont-reconnect) and never restart it.
+- **Masking go-librespot** breaks `spot_supervisor.py` only if the fake's default changes — it pins argv with `VIBB_GO_UNIT` unset (`tests/spot_supervisor.py:87,111,144`), fine. But the daemon's `_ensure_spotify_backend` `systemctl start` (`:762`) and the supervisor's park/unpark (`:5307,5364`) now start/stop **the sidecar unit**, killing the sidecar's child supervision and its exit-10 latch state; the sidecar must persist the latch (a file) so a supervisor `start` after "internet is back" does not brick-loop an expired child.
+- **The seam pin will break:** `spotify_engine_seam.py:56-65` asserts `hits == ["pi/install.sh"]`; `spotify-engine.sh` will contain `systemctl mask go-librespot`. Amend the pin to `{"pi/install.sh", "pi/spotify-engine.sh"}` with the same justification (they own the unit files) — nothing else.
+
+---
+
+## (a) NEW findings D1–D3 missed
+
+1. **`/cache/snapshot` fail-open → perpetual re-warm** (item 3). Highest practical risk: turns D3 into a 500-track walk several times a day.
+2. **Root-owned radio markers**: soloistd (`$RUN_USER`) cannot touch BUSY/PAGING; every "the sidecar yields like the sweep" sentence silently no-ops (`radio.py:44-50`, `/run` 755 root). Drive the warm from the daemon.
+3. **btwatchd's 120 s starvation belt** pages through any warm longer than 2 min with the speaker absent — D3's car-trip case.
+4. **`username` in the dialect**: `player.py:262-267` exits after 30 s without it; the plan records that Soloist's `auth_state` has none.
+5. **Autoplay at context end** is the only thing that stops a warm; the API's `source: autoplay` field is the stop condition and appears nowhere in the plan.
+6. **`VIBB_GO_CONFIG` under soloist** makes the supervisor's zeroconf lock rewrite go-librespot's config and restart the wrong unit (item 14).
+7. **Supervisor park/stop of the sidecar unit** loses the exit-10 latch unless persisted.
+8. **Volume shroud crash**: a sidecar dying mid-walk leaves Connect volume at 0; `_apply_box_volume` (`player.py:163-176,266`) re-applies on the next tap, so it heals — but the sidecar must also restore on its own start.
+9. **The `-k` secret and `hidepid`**: no `/proc` hardening on the box today; without it D2's wording is wrong (item 7).
+10. **Updater needs `clock_trusted()`**: TLS to the CDN against the RTC-less boot clock fails exactly like the go-librespot AP case (`install.sh:596`).
+11. **Warm eligibility while paused** costs the kid a resume walk instead of an unpause (item 1).
+12. **`spotify-engine` file is written before the audio stack is known** (`install.sh:181`) — a `--soloist` run that later fails in `audio_stack_apply` leaves `spotify-engine=soloist` remembered with go-librespot still serving.
+
+## (b) Pins before each step lands (`tests/run_all.py` style, one file each)
+
+**Step 3 (`spotify-engine.sh`)**
+- `spotify_engine_toggle.py` — against a fake systemctl + `VIBB_FS_ROOT`: soloist refused when `audio-stack` ≠ pipewire *without writing any file*; `vibb-soloistd.service` written as `$RUN_USER` with `EnvironmentFile=-/etc/vibb/soloist.env`, `Restart=on-failure` never `always`; go-librespot masked never removed; `--librespot` unmasks, removes the engine env, leaves `config.yml` byte-identical; `VIBB_GO_CONFIG` absent from every unit under soloist.
+- `install_unit_order.py` (extend) — `VIBB_GO_API`/`VIBB_GO_UNIT` present on daemon, bt-reconnect, idle, buttons, rfid; the engine file is written *after* `audio_stack_apply` succeeds.
+- `spotify_engine_seam.py` (amend) — the literal-unit allowlist is exactly `{install.sh, spotify-engine.sh}`; `extra.sh` derives the engine unit from `/etc/vibb/spotify-engine`.
+
+**Step 4 (`soloistd.py`)**
+- `soloist_contract.py` — dialect parity: `/status` carries `username`, `track`, `paused`, `stopped`, `play_origin == "go-librespot"` for box plays; `/player/play {uri, skip_to_uri, position}` lands at the exact item/position via the walk; `/cache/download` idempotent from the ledger; `/cache/snapshot` answers or the ledger gates.
+- `soloist_warm_invisible.py` — during a warm `/status` equals the pre-warm snapshot; `bookmark_step` returns None for the whole walk; the arbiter never yields mpv.
+- `soloist_warm_abort.py` — any dialect command mid-walk aborts, restores volume, then executes; ledger records the index; walk stops on `source: autoplay`/empty upcoming; ≤ N items per `cache: N`; ≥ 3 s pacing.
+- `soloist_exit10_latch.py` — exit 10 persists across a unit stop/start; `/soloist/health` reports `expired`, `needs-key`, `needs-pair`, `offline`, `audio-unbound` distinctly; `play()` fast-fails on each.
+- `sweep_warm_gate.py` — the sweeper holds the warm on `_audible_now() and _streaming_now()`, touches BUSY every ≤ 10 s while it runs, and posts abort when audible flips.
+
+**Step 5 (pairing / updater / key)**
+- `soloist_configure.py` — token + JSON-CT gate, 0600 `soloist.env`, previous file restored on `bad-key`, `needs-key` on removal, key never in the daemon log.
+- `soloist_updater.py` — fake CDN: 304 → no-op; 200 with bad crc32c → tmp removed, binary untouched; good → `--version` runs, `os.replace`, `.prev` kept, ETag stored; stale `*.tmp` cleaned; refuses when `clock_trusted()` False or `_audible_now()`; composite `-N` checksum detected and refused/fallback.
+- `crc32c.py` — check value `0xE3069283`, base64 form, and a 1 MB timing sanity.
+- `idle_shutdown.py` (extend) — backup then updater, each bounded, poweroff regardless; the warm hold releases at its budget.
+
+## (c) Go/no-go and slice order
+
+**Go for step 3 now; hold step 4's warm and step 5's updater until two bench facts land.** `spotify-engine.sh` is mechanical, fully testable against the fake systemctl, and its four defects above are all install-time wiring the owner can fix from this review. `soloistd.py`'s core (child supervision with the persisted exit-10 latch, WS client, dialect `/status`+`/player/*`, the resume walk with shroud, the §I binding and AM-16 bind check) can be written now against the fake WS server — but **do not code warming until the bench answers** (i) does a skip cancel the in-flight fetch and what a truncated file does on replay (item 5), and (ii) is the CDN's `x-amz-checksum-crc32c` full-object or composite (item 11). Order: **3a** `audio_stack_peek` + engine refuse + engine-file-after-apply → **3b** `spotify-engine.sh` + `vibb-soloistd.service` + env on all five units + `extra.sh` → **3c** seam/order pins → **4a** sidecar skeleton: supervisor, latch, health states, `username` in `/status` → **4b** dialect play/controls + walk → **4c** binding + bind check (B9) → **4d** warm as an idempotent `/cache/download` driven by the daemon's sweeper, invisible in `/status`, autoplay stop, `cache: N` bound → **5a** `/soloist/configure` + `needs-key` in `/status`/UI + play fast-fail → **5b** `--pair` oneshot → **5c** updater unit + monotonic timer + the idle hook's second slot.
