@@ -332,8 +332,12 @@ the same invariants the rest of the box lives by:
   guard in `radio.py`/`_audible_now`/the sweep's `BUSY_CHECK` enforces;
   a warm that starts while the box is idle ABORTS the instant a play
   starts (any button/tap/card), exactly like the sweep yields;
-- **never on the hotspot** — warming over the phone's metered link pays
-  the bill the cache exists to avoid (`netmgmt`'s hotspot marker);
+- **any wifi counts, the hotspot included** (owner, 2026-09-04: "er den
+  på wifi, så skal den jobbe med cachen, uansett"). The earlier
+  home-wifi-only gate is dropped: a car trip on the phone's hotspot is
+  exactly when the next tap should already be cached, and the owner
+  owns that data budget, not the box. (The UPDATER keeps its hotspot
+  skip: a 12.8 MB binary is not the cache — say the word and it goes too.)
 - **silent by construction** — the child is retargeted to `vibb_null`
   for the warm (§I), volume-0 as belt; the HAT and BT nodes stay
   `suspended` (bench B9 asserts it);
@@ -341,7 +345,7 @@ the same invariants the rest of the box lives by:
   Spotify playback (same child), and while the kid plays a podcast on
   the HAT (no A2DP) warming may proceed: PipeWire mixes, the null sink
   is a separate node, and wifi is free.
-Dropped from the gate: charger and idle. The trigger is the library
+Dropped from the gate: charger, idle, and the wifi kind. The trigger is the library
 write (`/library` save → the sweeper's existing wake, a new branch for
 soloist-routed entries with `cache: N`), plus the sweep's normal pass
 for anything missed (offline at add time, aborted by a play).
