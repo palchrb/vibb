@@ -112,6 +112,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The vibb package sits next to this script in the repo, or under
@@ -210,6 +211,21 @@ SOLOIST_ENV = os.environ.get("VIBB_SOLOIST_ENV", "/etc/vibb/soloist.env")
 # waits 30 s for a username and exits into a dead box (AM-48)
 ENGINE_NO_SESSION = ("needs-key", "needs-pair", "expired", "bad-key",
                      "audio-unbound")
+
+
+def _sidecar_post(path, body=None, timeout=5):
+    """POST to the engine sidecar's own (non-dialect) endpoints."""
+    import urllib.error
+    req = urllib.request.Request(_spotify.API + path, data=json.dumps(body or {}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
 
 
 def _engine_state():
@@ -3848,6 +3864,18 @@ class Handler(BaseHTTPRequestHandler):
                                          "removed": not key})
                     except (OSError, subprocess.TimeoutExpired) as e:
                         self._send(500, {"error": "write-failed",
+                                         "detail": e.__class__.__name__})
+            elif self.path == "/soloist/pair":
+                # proxied to the sidecar (it owns the data dir): stop the
+                # child, run `soloist --pair`, start again. Token-gated here.
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist"})
+                else:
+                    try:
+                        code, r = _sidecar_post("/soloist/pair")
+                        self._send(code, r)
+                    except OSError as e:
+                        self._send(503, {"error": "engine-unreachable",
                                          "detail": e.__class__.__name__})
             elif self.path == "/backup/configure":
                 # Point the box at ANY rclone-backed restic repo. The owner

@@ -174,6 +174,12 @@ def _cycle(idle):
 
 
 BACKUP_MAX_S = int(os.environ.get("VIBB_IDLE_BACKUP_MAX", "180"))
+# The Soloist updater's slot on the same way down (PLAN-pipewire-soloist
+# D1/AM-50): after the backup (irreplaceable first), its own budget, and
+# backup + update < the 600 s window of the poweroff-imminent marker.
+UPDATE_MAX_S = int(os.environ.get("VIBB_IDLE_UPDATE_MAX", "120"))
+UPDATE_UNIT = os.environ.get("VIBB_SOLOIST_UPDATE_UNIT",
+                             "/etc/systemd/system/vibb-soloist-update.service")
 
 
 def _backup_before_off():
@@ -213,6 +219,17 @@ def _backup_before_off():
             timeout=BACKUP_MAX_S)
     except Exception:
         pass   # a failed backup must never block the shutdown
+    if os.path.exists(UPDATE_UNIT):
+        # soloist engine only (the unit exists only then): a zero-byte
+        # ETag check most days, a bounded download when there is a new
+        # build; the sidecar never restarts the child on this path
+        try:
+            subprocess.run(
+                ["systemctl", "start", "--wait", "vibb-soloist-update.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=UPDATE_MAX_S)
+        except Exception:
+            pass
 
 
 def main():

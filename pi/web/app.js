@@ -792,6 +792,16 @@ function renderSpotifyState(state) {
   const show = p.dataset.soloist === "1";
   if ($("#soloist-key-form")) $("#soloist-key-form").hidden = !show;
   if ($("#soloist-key-help")) $("#soloist-key-help").hidden = !show;
+  if ($("#soloist-pair")) $("#soloist-pair").hidden = state !== "needs-pair";
+}
+
+if ($("#btn-soloist-pair")) {
+  $("#btn-soloist-pair").addEventListener("click", async () => {
+    try {
+      await api("/soloist/pair", { method: "POST" });
+      toast("Open the Spotify app on this Wi-Fi and pick the box under Devices", 10000);
+    } catch (e) { toast(e.message, 8000); }
+  });
 }
 
 if ($("#soloist-key-form")) {

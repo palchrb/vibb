@@ -138,4 +138,17 @@ for state in daemon.ENGINE_NO_SESSION:
     assert f'"{state}":' in js, f"the PWA names the {state} state"
 print("6. PWA form, state line, local confirm, every state named OK")
 
+# 7. /soloist/pair is a token-gated proxy to the sidecar; 409 under go-librespot
+PROXIED = []
+daemon._sidecar_post = lambda path, body=None, timeout=5: (PROXIED.append(path), (202, {"result": "pairing"}))[1]
+assert call("/soloist/pair", tok=None)[0] == 401
+code, r = call("/soloist/pair")
+assert code == 202 and r["result"] == "pairing" and PROXIED == ["/soloist/pair"], (code, r, PROXIED)
+paths.GO_UNIT = "go-librespot"
+assert call("/soloist/pair")[0] == 409
+paths.GO_UNIT = "vibb-soloistd"
+assert 'id="btn-soloist-pair"' in html and '"/soloist/pair"' in js
+assert 'state !== "needs-pair"' in js, "the pair button shows for needs-pair only"
+print("7. /soloist/pair proxied, gated, 409 under go-librespot; PWA button OK")
+
 print("\nall soloist_configure checks passed")

@@ -144,3 +144,42 @@ print("9. active ssh session holds auto-off; logout resumes OK")
 
 print("IDLE SHUTDOWN OK — playback or hands on the box keep it alive, "
       "'never' never counts, and it dies exactly at the parent's limit.")
+
+# 9. the Soloist updater's slot on the same way down (PLAN-pipewire-soloist
+#    D1/AM-50): only when its unit exists (the soloist engine), AFTER the
+#    backup (irreplaceable first), bounded, and a hung updater never
+#    blocks the poweroff either
+import tempfile as _tf  # noqa: E402
+
+unit = os.path.join(_tf.mkdtemp(), "vibb-soloist-update.service")
+open(unit, "w").write("[Service]\n")
+idle.UPDATE_UNIT = unit
+CALLS2 = []
+idle.subprocess.run = lambda argv, **kw: CALLS2.append(" ".join(argv[:4]))
+PLAYING[0] = False
+SSH[0] = False
+set_limit(2)
+n = idle._cycle(0)
+assert idle._cycle(n) is None
+assert CALLS2[:2] == ["systemctl start --wait vibb-backup.service",
+                      "systemctl start --wait vibb-soloist-update.service"], CALLS2
+assert CALLS2[-1] == "poweroff"
+CALLS2.clear()
+
+
+def _hang(argv, **kw):
+    CALLS2.append(" ".join(argv[:4]))
+    if "vibb-soloist-update.service" in argv:
+        raise idle.subprocess.TimeoutExpired("update", idle.UPDATE_MAX_S)
+
+
+idle.subprocess.run = _hang
+n = idle._cycle(0)
+assert idle._cycle(n) is None and CALLS2[-1] == "poweroff", CALLS2
+idle.UPDATE_UNIT = "/nonexistent/vibb-soloist-update.service"
+CALLS2.clear()
+idle.subprocess.run = lambda argv, **kw: CALLS2.append(" ".join(argv[:4]))
+n = idle._cycle(0)
+assert idle._cycle(n) is None
+assert not any("soloist-update" in c for c in CALLS2), "no unit (go-librespot box): no slot"
+print("9. updater slot: after the backup, only when its unit exists, a hang never blocks poweroff OK")

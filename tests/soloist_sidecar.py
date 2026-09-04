@@ -159,6 +159,9 @@ open(BIN, "w").write('''#!/usr/bin/env python3
 import os, sys, time
 args = sys.argv[1:]
 d = args[args.index("-D") + 1]
+if "-p" in args:                       # --pair: store the session, exit 0
+    open(os.path.join(d, "paired"), "w").write("ok")
+    print("paired", flush=True); sys.exit(0)
 open(os.path.join(d, "argv.json"), "w").write(repr(args))
 open(os.path.join(d, "ws.addr"), "w").write("127.0.0.1")
 open(os.path.join(d, "ws.port"), "w").write(os.environ["FAKE_WS_PORT"])
@@ -362,5 +365,66 @@ assert h["child"] is None and h["bound"] is False, h
 assert any(m["command"] == "pause" for m in FAKE.received), "a mis-bound child is paused before it is killed"
 p.terminate(); p.wait(5)
 print("7. bind check: pinned node -> bound; another sink -> paused, killed, audio-unbound OK")
+
+# 8. /soloist/updated (AM-52): a fresh build clears the exit-10 latch and
+#    restarts the child — now when idle, deferred while playing, never on
+#    the way down (poweroff-imminent marker)
+FAKE.status, FAKE.context = "idle", None
+open(PWD_FILE, "w").write(json.dumps(graph(1)))
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+open(os.path.join(data, "build-expired.latch"), "w").write("stale\n")
+pid0 = get(base, "/soloist/health")[1]["child"]
+code, r = post(base, "/soloist/updated")
+assert r["result"] == "restarted", r
+assert not os.path.exists(os.path.join(data, "build-expired.latch")), "a fresh build = a fresh 90 days"
+wait_state(base, "ok")
+assert get(base, "/soloist/health")[1]["child"] not in (None, pid0), "the child was restarted"
+post(base, "/player/play", {"uri": CTX}); time.sleep(0.3)
+code, r = post(base, "/soloist/updated")
+assert r["result"] == "deferred" and r["pending_restart"] == "updated", r
+run_dir = json.loads(open(os.path.join(data, "argv.json")).read().replace("'", '"'))  # noqa: just to touch data
+p.terminate(); p.wait(5)
+print("8. updated: latch cleared, restart when idle, deferred while playing OK")
+
+# 8b. never on the way down
+FAKE.status, FAKE.context = "idle", None
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+run_env_dir = None
+for line in open("/proc/%d/environ" % p.pid, "rb").read().split(b"\0"):
+    if line.startswith(b"VIBB_RUN="):
+        run_env_dir = line.split(b"=", 1)[1].decode()
+open(os.path.join(run_env_dir, "poweroff-imminent"), "w").write(str(time.time()))
+pid0 = get(base, "/soloist/health")[1]["child"]
+code, r = post(base, "/soloist/updated")
+assert r["result"] == "next-boot", r
+time.sleep(0.5)
+assert get(base, "/soloist/health")[1]["child"] == pid0, "no restart on the poweroff path"
+p.terminate(); p.wait(5)
+print("8b. updated on the way down: next boot, child untouched OK")
+
+# 9. /soloist/pair: the normal child is stopped, `soloist -p` runs and
+#    stores the session, the child comes back; no key -> 409
+FAKE.status, FAKE.context = "idle", None
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+pid0 = get(base, "/soloist/health")[1]["child"]
+code, r = post(base, "/soloist/pair")
+assert code == 202 and r["result"] == "pairing", (code, r)
+for _ in range(60):
+    h = get(base, "/soloist/health")[1]
+    if h["state"] == "ok" and h["child"] not in (None, pid0) and not h["pairing"]:
+        break
+    time.sleep(0.1)
+else:
+    raise AssertionError(f"pairing never completed: {h}")
+assert os.path.exists(os.path.join(data, "paired")), "soloist -p ran against the same data dir"
+p.terminate(); p.wait(5)
+p, base, data = start_sidecar(key="")
+wait_state(base, "needs-key")
+assert post(base, "/soloist/pair")[0] == 409
+p.terminate(); p.wait(5)
+print("9. pair: child stopped, --pair stored the session, child back; no key -> 409 OK")
 
 print("\nall soloist_sidecar checks passed")

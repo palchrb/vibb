@@ -122,6 +122,38 @@ WantedBy=multi-user.target
 EOF
 }
 
+_se_write_update_units() {
+  write_if_changed "$_SE_ETC/systemd/system/vibb-soloist-update.service" <<EOF || true
+[Unit]
+Description=Vibb: fetch a newer Spotify Soloist build when the CDN has one (D1)
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=PYTHONPATH=/usr/local/lib/vibb-py
+Environment=VIBB_SOLOIST_BIN=/usr/local/bin/soloist
+Environment=VIBB_GO_API=http://127.0.0.1:$SOLOISTD_PORT
+ExecStart=/usr/bin/python3 -m vibb.soloist_update
+EOF
+  write_if_changed "$_SE_ETC/systemd/system/vibb-soloist-update.timer" <<'EOF' || true
+[Unit]
+Description=Vibb: Soloist update check (the idle-shutdown hook is the real trigger)
+
+[Timer]
+# MONOTONIC, never OnCalendar: Persistent= would fire at boot on the
+# RTC-less bogus clock, inside the radio storm, with TLS failing against
+# 1970. The check is one 1-byte round trip, so every 6 h is cheap; the
+# module's own gates (clock, busy) decide whether to do anything.
+OnBootSec=20min
+OnUnitActiveSec=6h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 spotify_engine_apply() {
   # audio_stack_unit_env reads AUDIO_STACK; install.sh resolved it long before
   # this runs, but never depend on it (soloist implies pipewire anyway)
@@ -129,14 +161,17 @@ spotify_engine_apply() {
   if [[ $SPOTIFY_ENGINE == soloist ]]; then
     install_if_changed 755 "$SCRIPT_DIR/soloistd.py" "$_SE_ROOT/usr/local/bin/vibb-soloistd" || true
     _se_write_soloistd_unit
+    _se_write_update_units
     systemctl daemon-reload
     # two Connect devices for one box is the plan's rejected coexistence:
     # mask go-librespot, never remove it (rollback = --librespot)
     systemctl mask --now go-librespot.service >/dev/null 2>&1 || true
     systemctl enable --now vibb-soloistd.service
+    systemctl enable --now vibb-soloist-update.timer
     _se_say "soloistd up; go-librespot masked (rollback: ./install.sh --librespot)"
   else
     if [[ -e $_SE_ETC/systemd/system/vibb-soloistd.service ]]; then
+      systemctl disable --now vibb-soloist-update.timer >/dev/null 2>&1 || true
       systemctl disable --now vibb-soloistd.service >/dev/null 2>&1 || true
       systemctl mask vibb-soloistd.service >/dev/null 2>&1 || true
       _se_say "soloistd disabled + masked (rollback)"

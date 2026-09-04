@@ -100,7 +100,15 @@ assert not any("remove" in c or "purge" in c for c in calls)
 assert "Environment=VIBB_GO_API=http://127.0.0.1:3688" in r.stdout and "Environment=VIBB_GO_UNIT=vibb-soloistd" in r.stdout
 assert "VIBB_GO_CONFIG" not in r.stdout.split("GOCONF:")[1], "no GO_CONFIG under soloist (AM-53)"
 assert "UNIT=vibb-soloistd" in r.stdout
+upd = open(os.path.join(root, "etc/systemd/system/vibb-soloist-update.service")).read()
+assert "ExecStart=/usr/bin/python3 -m vibb.soloist_update" in upd and "Nice=19" in upd
+timer = open(os.path.join(root, "etc/systemd/system/vibb-soloist-update.timer")).read()
+assert "OnBootSec=" in timer and "OnUnitActiveSec=" in timer, "monotonic timer"
+assert not re.search(r"^(OnCalendar|Persistent)=", timer, re.M), \
+    "never a calendar timer: it would fire at boot on the RTC-less bogus clock (AM-50)"
+assert "systemctl enable --now vibb-soloist-update.timer" in calls
 print("3. soloist: sidecar installed, unit shaped, go-librespot masked, env, no GO_CONFIG OK")
+print("3b. updater unit + MONOTONIC timer written and enabled OK")
 
 # 4. rollback keeps config.yml byte-identical
 cfg = os.path.join(root, "config.yml"); open(cfg, "w").write("audio_backend: alsa\naudio_device: vibb_bt\n")
@@ -110,6 +118,7 @@ os.remove(os.path.join(root, "systemctl.log"))
 r, calls, rec, _ = run("golibrespot", "pipewire", root=root)
 assert r.returncode == 0 and rec == "golibrespot", (r.stderr, rec)
 assert "systemctl disable --now vibb-soloistd.service" in calls and "systemctl mask vibb-soloistd.service" in calls
+assert "systemctl disable --now vibb-soloist-update.timer" in calls, "the rollback stops the updater"
 assert "systemctl unmask go-librespot.service" in calls
 assert calls.index("systemctl mask vibb-soloistd.service") < calls.index("systemctl unmask go-librespot.service")
 assert open(cfg).read() == before

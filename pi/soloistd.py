@@ -59,6 +59,9 @@ LATCH_FILE = os.path.join(DATA_DIR, "build-expired.latch")
 OUT_FILE = os.path.join(STATE_DIR, "output.json")
 MAC_FILE = os.environ.get("VIBB_BT_FILE", "/etc/vibb/bt-headset")
 BOX_ORIGIN = "go-librespot"          # the dialect's "box started this" value
+RUN_DIR = os.environ.get("VIBB_RUN", "/run/vibb" if os.access("/run", os.W_OK) else "/tmp")
+IDLE_RESTART_S = float(os.environ.get("VIBB_SOLOIST_IDLE_RESTART_S", "600"))  # paused this long = idle
+PAIR_MAX_S = float(os.environ.get("VIBB_SOLOIST_PAIR_MAX_S", "180"))
 WALK_MAX_SKIPS = 300                 # a 500-item context is a Web-API job (P2)
 WALK_MAX_S = 25.0
 CMD_TIMEOUT_S = 8.0
@@ -205,6 +208,9 @@ class Engine:
         self.last_lines = []
         self.restarts = 0
         self.bad_key = False                   # the child said the key is no good
+        self.pending_restart = None            # why a restart waits for idle (AM-52)
+        self.paused_since = None
+        self.pairing = False
         self.bound = None                      # AM-16: None unknown, True/False
         self._binding = False                  # one authoritative check in flight
         self.stop = threading.Event()
@@ -226,6 +232,7 @@ class Engine:
         return {"state": self.state, "days_left": self.days_left, "build": self.build,
                 "child": self.child.pid if self.child and self.child.poll() is None else None,
                 "ws": self.ws is not None, "node": self.node, "bound": self.bound,
+                "pending_restart": self.pending_restart, "pairing": self.pairing,
                 "device_name": DEVICE_NAME, "warming": None}
 
     # ----- the child -----
@@ -418,6 +425,8 @@ class Engine:
                     self.pending_uri = None
             elif t == "playback_changed":
                 self.pb["status"] = msg.get("status") or self.pb["status"]
+                self.paused_since = time.monotonic() if self.pb["status"] == "paused" \
+                    else (None if self.pb["status"] == "playing" else self.paused_since)
                 self._maybe_bind_check()
             elif t == "position_sync":
                 self.pb["position"] = msg.get("position") or self.pb["position"]
@@ -436,6 +445,77 @@ class Engine:
     def mark(self):
         with self.events:
             return self.evseq
+
+    # ----- AM-52: the post-update restart, only when idle -----
+    def is_idle(self):
+        """No track loaded, or paused for IDLE_RESTART_S: the bookmarker has
+        flushed and play()'s resume falls through to the bookmark."""
+        with self.mirror_lock:
+            st, item, since = self.pb.get("status"), self.pb.get("item"), self.paused_since
+        if st in (None, "idle") or not item:
+            return True
+        return st == "paused" and since is not None and time.monotonic() - since >= IDLE_RESTART_S
+
+    def _poweroff_imminent(self):
+        try:
+            return 0 <= time.time() - os.path.getmtime(os.path.join(RUN_DIR, "poweroff-imminent")) < 600
+        except OSError:
+            return False
+
+    def updated(self):
+        """The updater swapped the binary. A fresh build is a fresh 90 days:
+        drop the exit-10 latch. Restart the child now if idle, at the next
+        idle moment otherwise — and never on the way down."""
+        try:
+            os.remove(LATCH_FILE)
+        except OSError:
+            pass
+        if self._poweroff_imminent():
+            self.pending_restart = "updated (poweroff imminent — next boot)"
+            return "next-boot"
+        if self.is_idle():
+            self.pending_restart = None
+            self.restart_child("updated")
+            return "restarted"
+        self.pending_restart = "updated"
+        return "deferred"
+
+    def _idle_restart_watch(self):
+        while not self.stop.is_set():
+            time.sleep(30)
+            if self.pending_restart and self.pending_restart == "updated" and self.is_idle() \
+                    and not self._poweroff_imminent():
+                self.pending_restart = None
+                self.restart_child("updated, box idle")
+
+    # ----- 5b: pairing -----
+    def pair(self):
+        """`soloist --pair`: the phone's Spotify app picks the box under
+        Devices; the child stores the session in the data dir and exits.
+        One owner of the data dir at a time: the normal child is stopped
+        for the duration, then started again."""
+        key = os.environ.get("SOLOIST_API_KEY", "")
+        if not key:
+            return "needs-key"
+        if self.pairing:
+            return "already"
+        self.pairing = True
+        threading.Thread(target=self._pair_run, args=(key,), daemon=True).start()
+        return "pairing"
+
+    def _pair_run(self, key):
+        try:
+            self.stop_child()
+            self.set_state("pairing")
+            r = subprocess.run([SOLOIST, "-n", DEVICE_NAME, "-k", key, "-D", DATA_DIR, "-p"],
+                               capture_output=True, text=True, timeout=PAIR_MAX_S)
+            log(f"pair exited rc={r.returncode}: {(r.stdout or r.stderr).strip()[-120:]}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log(f"pair failed: {e!r}")
+        finally:
+            self.pairing = False
+            self.state = "starting"
+            self.start_child()
 
     def _maybe_bind_check(self):
         """AM-16: Soloist may create its stream lazily on the first play, so
@@ -712,6 +792,14 @@ class Handler(BaseHTTPRequestHandler):
                     ENGINE.restart_child(f"output -> {body.get('device')}")
                     self._send(200, {"ok": True, "node": ENGINE.node})
                     return
+                elif path == "/soloist/updated":
+                    self._send(200, {"result": ENGINE.updated(),
+                                     "pending_restart": ENGINE.pending_restart})
+                    return
+                elif path == "/soloist/pair":
+                    r = ENGINE.pair()
+                    self._send(409 if r == "needs-key" else 202, {"result": r})
+                    return
                 elif path == "/cache/download":
                     self._send(404, {"error": "not-supported"})   # warming: D3, step 4d
                     return
@@ -734,6 +822,7 @@ def _on_term(*_a):
 def main():
     signal.signal(signal.SIGTERM, _on_term)
     ENGINE.start_child()
+    threading.Thread(target=ENGINE._idle_restart_watch, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     assert srv.server_address[0] == "127.0.0.1"
     log(f"up on 127.0.0.1:{PORT} state={ENGINE.state} node={ENGINE.node}")
