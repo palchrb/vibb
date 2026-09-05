@@ -19,29 +19,20 @@ def log(msg):
     print(f"vibbd: {msg}", flush=True)
 
 
-def local_volume(stored, pcm, cap, everywhere=False):
-    """The volume to actually use, given where the sound is going.
+def local_volume(stored, cap):
+    """The volume to actually USE, on any output: min(stored, cap).
 
-    The built-in speaker and a pair of headphones do not share a scale,
-    and the box keeps ONE volume number. So the level a parent set for
-    a child's headphones — often near the top, they are quiet — becomes
-    a room-filling level the moment audio lands on the HAT's amplifier.
-    That matters because the speaker is what the box falls back to in
-    the dark, when a child has just pulled dead headphones off: the
-    loudest event this box can produce was, until now, the one action
-    it offers in exactly that moment.
+    Owner 2026-09-05: ONE cap for the box (`volume_cap`, the child-safety
+    ceiling the knob already obeys), applied at every landing on every
+    output — a live reopen onto the HAT, mpv's start, the pre-play volume
+    push. The separate built-in-speaker limit (`local_fallback_cap`) is
+    gone: with a cap on the knob AND on the landing, the headphones-die
+    -> speaker fallback lands at the box cap, never above it.
 
-    Cap it. Applied at USE, never written back (`_save_volume` is the
-    only writer and must keep meaning "what the user chose"), so the
-    headphone level is still there when the headphones come back.
-    cap=0 disables the whole thing.
-
-    everywhere=True (AM-7): the audio policy self-test found a SAFETY
-    drift — a stream might reach the HAT without vibb choosing it — so
-    until the next green run the cap applies on EVERY output. Nothing is
-    refused (the bedtime rule); the worst case anywhere is the cap.
+    Applied at USE, never written back (`_save_volume` is the only writer
+    and keeps meaning "what the user chose"). cap=0 disables.
     """
-    if not cap or (pcm != OUTPUT_PCMS["local"] and not everywhere):
+    if not cap:
         return stored
     return min(stored, cap)
 

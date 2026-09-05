@@ -34,10 +34,10 @@ SETTING_SPECS = {
     "screen_brightness": (100, 10, 100),  # % backlight (min 10: never black)
     "idle_shutdown_min": (5, 0, 240),  # screen blanks at 30s; no reason to
                                        # burn the ~100mA idle floor for 30 min
+    # volume_cap: the ONE ceiling — on the knob and at every landing on every
+    # output (owner 2026-09-05; the built-in-only local_fallback_cap is gone,
+    # an old settings.json key is simply ignored)
     "volume_cap": (100, 30, 100),
-    # Ceiling for audio that lands on the BUILT-IN speaker, which shares
-    # one volume number with the headphones but not their scale. 0 = off.
-    "local_fallback_cap": (35, 0, 100),
     "spotify_cache_gb": (20, 1, 100),
     "spotify_bitrate": (160, 96, 320),  # further constrained to BITRATES
     # Continue what was playing when the box was switched off: -1 always

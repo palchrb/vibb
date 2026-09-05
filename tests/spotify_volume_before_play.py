@@ -7,9 +7,9 @@ Until 2026-09-02 `_apply_box_volume` sent volume.json straight to
 landing on the built-in speaker played its first 0.5-2s at headphone
 level. Pinned:
 
-  1. on the local pcm the POSTed volume is min(stored, local_fallback_cap),
+  1. on the local pcm the POSTed volume is min(stored, volume_cap),
      scaled by volume_steps exactly as before (no double scaling)
-  2. on the bt pcm it is the stored value, untouched
+  2. on the bt pcm it is capped the same way (ONE cap, owner 2026-09-05)
   3. the FIRST /player/volume precedes /player/play; the post-play apply
      stays as belt
   4. volume.json is never written back
@@ -52,6 +52,8 @@ player.time.sleep = lambda s: None
 
 with open(os.path.join(TMP, "volume.json"), "w") as f:
     json.dump({"volume": 90}, f)
+from vibb import sysinfo  # noqa: E402
+sysinfo.update_settings({"volume_cap": 35})
 
 
 def run(pcm):
@@ -74,21 +76,11 @@ assert vols and all(v == 35 for v in vols), \
 assert paths.count("/player/volume") >= 2, "the post-play apply stays as belt"
 print("1. local pcm: capped to 35, first POST before /player/play OK")
 
-# 2: bt pcm -> untouched
+# 2: bt pcm -> the same cap (one ceiling for the box)
 seq = run("vibb_bt")
 vols = [b["volume"] for p, b in seq if p == "/player/volume"]
-assert vols and all(v == 90 for v in vols), f"headphones keep 90, got {vols}"
-print("2. bt pcm: the stored level, uncapped OK")
-
-# 3b: AM-7 — fail-safety caps the bt pcm too
-from vibb import audio  # noqa: E402
-
-audio.cap_everywhere = lambda: True
-seq = run("vibb_bt")
-vols = [b["volume"] for p, b in seq if p == "/player/volume"]
-assert vols and all(v == 35 for v in vols), f"fail-safety: headphones capped too, got {vols}"
-audio.cap_everywhere = lambda: False
-print("3b. fail-safety caps the bt pcm as well OK")
+assert vols and all(v == 35 for v in vols), f"headphones capped to 35 too, got {vols}"
+print("2. bt pcm: the one cap applies OK")
 
 # 4: never written back
 with open(os.path.join(TMP, "volume.json")) as f:

@@ -1406,7 +1406,7 @@ class App:
         self.sonos = {"players": []}  # cached speaker list (menu gating)
         self.bt_found = []
         self.settings = {"screen_timeout_s": 30, "idle_shutdown_min": 30,
-                         "volume_cap": 100, "local_fallback_cap": 35}
+                         "volume_cap": 100}
         self.volume_flash = 0.0     # show volume overlay until this time
         self.volume_shown = None
         self.vol_mode_until = 0.0   # while set: a card is up and owns B/Y
@@ -2765,8 +2765,6 @@ class App:
             return [("Screen off after", self.fmt_timeout(s["screen_timeout_s"])),
                     ("Brightness", f"{s.get('screen_brightness', 100)}%"),
                     ("Volume cap", f"{s['volume_cap']}%"),
-                    ("Speaker limit",
-                     f"{s.get('local_fallback_cap', 35) or 'off'}"),
                     ("Auto-off (idle)", self.fmt_idle(s["idle_shutdown_min"])),
                     ("Browse", {0: "menus", 1: "carousel",
                                 2: "categories"}.get(
@@ -2883,8 +2881,6 @@ class App:
         cycles = {"Screen off after": ("screen_timeout_s", [15, 30, 60, 0]),
                   "Brightness": ("screen_brightness", [25, 50, 75, 100]),
                   "Volume cap": ("volume_cap", [60, 70, 80, 90, 100]),
-                  "Speaker limit": ("local_fallback_cap",
-                                    [0, 20, 35, 50, 70]),
                   # 5 first: it is the shipped default, and its absence
                   # meant ONE trip through this cycle lost the 5-min
                   # setting for good (QA power audit 2026-08-10)

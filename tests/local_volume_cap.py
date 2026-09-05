@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""The built-in speaker gets its own ceiling.
+"""ONE volume cap for the box, on every output, at every landing.
 
-The box keeps ONE volume number, but a pair of kids' headphones and the
-HAT's amplifier are not the same loudness — the level a parent sets for
-quiet headphones is a room-filling level on the speaker. That matters
-because the speaker is exactly what the box lands on in the dark, when a
-child has pulled dead headphones off: until now the loudest event this
-box could produce was the one action it offers in that moment.
-
-Pins: the cap applies on the local pcm only, at USE and never written
-back (volume.json must keep meaning "what the user chose"), on every
-path that can put audio on the speaker — a fresh mpv, the live retarget
-of a playing one, and (since 2026-09-02, NEW-1) a Spotify session's
-_apply_box_volume, which used to reach the HAT uncapped — and 0
-disables it. tests/spotify_volume_before_play.py pins the Spotify
-ordering (cap before /player/play)."""
+Owner 2026-09-05 (first Zero): the separate built-in-speaker limit
+(`local_fallback_cap`) is gone — `volume_cap`, the child-safety ceiling the
+knob already obeys, is the only cap, and it is applied at USE on every
+path that lands audio anywhere — a fresh mpv, the live retarget of a
+playing one, and a Spotify session's _apply_box_volume (NEW-1) — never
+written back (volume.json must keep meaning "what the user chose").
+The headphones-die -> speaker fallback therefore lands at the box cap.
+tests/spotify_volume_before_play.py pins the Spotify ordering."""
 import json
 import os
 import sys
@@ -28,33 +22,28 @@ os.environ["VIBB_SETTINGS"] = os.path.join(TMP, "settings.json")
 sys.path.insert(0, os.path.join(REPO, "pi"))
 
 from vibb import sysinfo  # noqa: E402
-from vibb.output import OUTPUT_PCMS, local_volume  # noqa: E402
+from vibb.output import local_volume  # noqa: E402
 
-LOCAL, BT = OUTPUT_PCMS["local"], OUTPUT_PCMS["bt"]
+# 1. the rule itself: min(stored, cap), whatever the output; 0 disables
+assert local_volume(90, 35) == 35
+assert local_volume(20, 35) == 20, "already quieter: leave it alone"
+assert local_volume(90, 0) == 90, "cap 0 = disabled"
+assert local_volume(100, 100) == 100
+print("1. min(stored, cap) on every output, never raised, 0 disables OK")
 
-# 1. the rule itself: capped on the speaker, untouched on bluetooth
-assert local_volume(90, LOCAL, 35) == 35
-assert local_volume(90, BT, 35) == 90, "headphones keep their own level"
-assert local_volume(20, LOCAL, 35) == 20, "already quieter: leave it alone"
-assert local_volume(90, LOCAL, 0) == 90, "cap 0 = disabled"
-assert local_volume(100, LOCAL, 100) == 100
-# AM-7: a safety drift in the audio policy caps EVERY output
-assert local_volume(90, BT, 35, everywhere=True) == 35
-assert local_volume(90, LOCAL, 35, everywhere=True) == 35
-assert local_volume(90, BT, 0, everywhere=True) == 90, "cap 0 still disables"
-print("1. capped on the speaker only, never raised, 0 disables OK")
-
-# 2. it is a real setting, with a default and a range
-assert sysinfo.SETTING_SPECS["local_fallback_cap"] == (35, 0, 100)
-assert sysinfo.load_settings()["local_fallback_cap"] == 35
-sysinfo.update_settings({"local_fallback_cap": 20})
-assert sysinfo.load_settings()["local_fallback_cap"] == 20
+# 2. it is THE setting: volume_cap, defaulted, range-checked — and the old
+#    built-in-only key is gone (an old settings.json carrying it is ignored)
+assert sysinfo.SETTING_SPECS["volume_cap"] == (100, 30, 100)
+assert "local_fallback_cap" not in sysinfo.SETTING_SPECS
+assert sysinfo.load_settings()["volume_cap"] == 100
+sysinfo.update_settings({"volume_cap": 70})
+assert sysinfo.load_settings()["volume_cap"] == 70
 try:
-    sysinfo.update_settings({"local_fallback_cap": 101})
+    sysinfo.update_settings({"volume_cap": 101})
     raise AssertionError("out of range must be rejected")
 except ValueError:
     pass
-print("2. settable, defaulted, range-checked OK")
+print("2. volume_cap is the one cap: settable, defaulted, range-checked OK")
 
 # 3. a fresh mpv on the speaker is capped — and the SAVED knob is not
 #    touched, so the headphone level is still there when they come back
@@ -77,11 +66,11 @@ print("3. fresh mpv capped at use; the saved knob is untouched OK")
 #     Spotify landing (spawn, blip resume, rebuild) goes through
 i_abv = src.index("def _apply_box_volume():")
 abv = src[i_abv:src.index("\ndef ", i_abv + 1)]
-assert "local_volume(" in abv and "local_fallback_cap" in abv, \
-    "Spotify must be capped for the HAT like mpv is (NEW-1)"
+assert "local_volume(" in abv and "volume_cap" in abv, \
+    "Spotify must be capped at the landing like mpv is (NEW-1)"
 assert abv.index("local_volume(") < abv.index("/player/volume"), \
     "cap the value BEFORE it is POSTed"
-print("3b. Spotify's box-volume apply is capped for the speaker OK")
+print("3b. Spotify's box-volume apply is capped at the landing OK")
 
 # 4. the LIVE retarget — the loudest path, since it moves a playing
 #    child onto the amplifier while mpv keeps the headphone softvol
@@ -101,14 +90,15 @@ assert "def _volume_setting(self):" in dsrc
 assert "self._volume_setting()" in window
 print("5. the cap is computed from the saved knob, so it cannot ratchet OK")
 
-# 6. reachable from both surfaces, or it is unsettable in practice
-assert "local_fallback_cap" in open(
+# 6. the old built-in-only limit is gone from both surfaces, the one cap stays
+assert "local_fallback_cap" not in open(
     os.path.join(REPO, "pi/web/app.js"), encoding="utf-8").read()
-assert "set-localcap" in open(
+assert "set-localcap" not in open(
     os.path.join(REPO, "pi/web/index.html"), encoding="utf-8").read()
-assert "local_fallback_cap" in open(
+assert "local_fallback_cap" not in open(
     os.path.join(REPO, "pi/ui.py"), encoding="utf-8").read()
-print("6. exposed in the PWA and on the screen OK")
+assert "set-cap" in open(
+    os.path.join(REPO, "pi/web/index.html"), encoding="utf-8").read()
+print("6. one cap in the PWA and on the screen, the speaker-only one gone OK")
 
-print("\nLOCAL VOLUME CAP OK — the fallback speaker can no longer be the "
-      "loudest thing in a dark bedroom.")
+print("\nVOLUME CAP OK — one ceiling, every output, every landing.")
