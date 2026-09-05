@@ -49,6 +49,7 @@ for _p in (_HERE, "/usr/local/lib/vibb-py"):
         break
 from vibb import content, mpv as _mpv, radio, spotify  # noqa: E402
 from vibb.output import OUTPUT_PCMS, audio_ready, local_volume  # noqa: E402
+from vibb import paths
 from vibb.paths import (STATE_DIR, go_unit_cmd, note_go_restart,  # noqa: E402
                         read_settings)
 
@@ -206,6 +207,18 @@ def accept_spot_bookmark(bm, uri, exact=False):
     if not bm.get("uri"):
         log("bookmark has no track uri — clean start")
         return None
+    if paths.GO_UNIT == "vibb-soloistd":
+        # AM-75: the list remembered from its last start (soloistd, from disk,
+        # instant) — a bookmark for a track no longer in it would send the
+        # resume walk skipping 300 times and landing at random
+        try:
+            d = spotify.context_tracks(uri, timeout=2, settle_s=0) or {}
+            known = [t.get("uri") for t in (d.get("tracks") or [])]
+            if known and bm["uri"] not in known:
+                log(f"bookmark track {bm['uri']} is no longer in the list — clean start")
+                return None
+        except (OSError, ValueError):
+            pass
     if not exact and (bm.get("position") or 0) <= SPOT_RESUME_MIN_MS:
         log(f"bookmark position {int((bm.get('position') or 0) / 1000)}s "
             f"is early — keeping the track, playing it from 0:00")

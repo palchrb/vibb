@@ -13,8 +13,11 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 
 from vibb import content, spotify, spotify_web, storytel
+from vibb import paths as _paths
+from vibb import radio as _radio
 from vibb.paths import ART_DIR, CACHE_DIR, STATE_DIR
 from vibb.spotify import is_spotify
 
@@ -76,7 +79,7 @@ def normalize_library(obj):
             order = e.get("order") or "auto"
             if order not in ORDERS:
                 raise ValueError(f"order must be one of {ORDERS}")
-            cache = e.get("cache", 0)
+            cache = e.get("cache", _default_cache(e.get("target") or ""))
             # -1 = keep all episodes offline; 0 = none; 1..100 = newest N
             if not isinstance(cache, int) or not (cache == -1 or 0 <= cache <= 100):
                 raise ValueError("cache must be -1 (all) or 0-100 (episodes "
@@ -378,6 +381,85 @@ _TASKSET = shutil.which("taskset")
 # behave like before the gate.
 
 PRECACHE_STATE = os.path.join(STATE_DIR, "spotify-precache.json")
+
+
+def _soloist():
+    """The Spotify engine is soloistd (the install-time toggle)."""
+    return _paths.GO_UNIT == "vibb-soloistd"
+
+
+def _default_cache(target):
+    """AM-45: under soloist a Spotify entry warms the moment it is added
+    (owner: "warm the moment I add something"); the PWA toggle still turns
+    it off per entry. Everything else keeps today's opt-in 0."""
+    return 1 if (_soloist() and is_spotify(target)) else 0
+
+
+# --- 4d: the soloist pass, driven from here (AM-37, AM-67, AM-70) ---------
+WARM_POLL_S = float(os.environ.get("VIBB_WARM_POLL_S", "5"))
+WARM_MAX_S = float(os.environ.get("VIBB_WARM_MAX_S", str(25 * 60)))
+WARM_START = None   # set by the daemon: called when a pass starts (wifi ps off)
+
+
+def _warm_health():
+    try:
+        with urllib.request.urlopen(spotify.API + "/soloist/health", timeout=3) as r:
+            return json.loads(r.read() or b"{}")
+    except (OSError, ValueError):
+        return {}
+
+
+def _warm_entry(uri, name):
+    """POST /cache/download to soloistd and STAY with the pass: touch BUSY
+    and the warming marker every WARM_POLL_S while it runs, abort it the
+    moment the box turns audible (AM-67), and stamp the library's
+    precache state ONLY when the sidecar says done (AM-70) — an aborted,
+    stalled or partial pass stays due for the next sweep."""
+    try:
+        _radio.wait_paging_clear()
+    except Exception:
+        pass
+    try:
+        out = json.loads(spotify.go("/cache/download", timeout=10, body={"uri": uri}) or b"{}")
+    except (OSError, ValueError) as exc:
+        log(f"warm {name}: {exc!r}")
+        return False
+    if out.get("done"):
+        log(f"warm {name}: already done ({out.get('warmed')} warmed)")
+        _precache_done(uri)
+        return True
+    log(f"warm {name}: queued")
+    if WARM_START:
+        try:
+            WARM_START()
+        except Exception:
+            pass
+    t0 = time.monotonic()
+    aborted = False
+    while True:
+        _radio.touch_busy()
+        _radio.touch_warming()
+        h = _warm_health()
+        w = h.get("warming")
+        if not w:
+            break
+        if not aborted and (_busy() or time.monotonic() - t0 > WARM_MAX_S):
+            log(f"warm {name}: box busy — aborting the pass")
+            try:
+                spotify.go("/cache/abort", timeout=25)
+            except OSError:
+                pass
+            aborted = True
+        _sync_wake.wait(WARM_POLL_S)
+        _sync_wake.clear()
+    last = h.get("warm_last") or {}
+    result = last.get("result") if last.get("uri") == uri else None
+    if result == "done":
+        log(f"warm {name}: done")
+        _precache_done(uri)
+        return True
+    log(f"warm {name}: {result or 'no result'} — stays due")
+    return False
 _PENDING_SNAP = {}  # uri -> snapshot observed by the due-check
 
 
@@ -560,6 +642,10 @@ def _cache_sweeper():
                     while _busy():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                         _sync_wake.clear()
+                    if _soloist():
+                        # 4d: the POST is the pass; stay with it (AM-37/67/70)
+                        _warm_entry(uri, e["name"])
+                        continue
                     try:
                         spotify.go("/cache/download", timeout=10,
                                    body={"uri": uri})

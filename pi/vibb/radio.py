@@ -35,6 +35,12 @@ PAGING_FILE = os.path.join(_RUN, "vibb-bt-paging")
 BUSY_TTL_S = float(os.environ.get("VIBB_RADIO_BUSY_TTL", "20"))
 PAGING_TTL_S = float(os.environ.get("VIBB_BT_PAGING_TTL", "10"))
 SKIP_FILE = os.path.join(_RUN, "vibb-user-skip")
+# WARMING (vibb-warming): the daemon's sweeper touches it every <=10 s while a
+# soloistd pass runs (4d, AM-68). btwatchd's blind pages hold on it BEFORE the
+# starvation belt: a page under a fetching pass is "BT paging + wifi", the
+# thrice-observed flap, and has nothing to gain. Bounded by its TTL.
+WARMING_FILE = os.path.join(_RUN, "vibb-warming")
+WARMING_TTL_S = float(os.environ.get("VIBB_WARMING_TTL", "30"))
 SKIP_TTL_S = float(os.environ.get("VIBB_USER_SKIP_TTL", "12"))
 
 
@@ -64,6 +70,15 @@ def touch_busy():
 
 def busy():
     return _fresh(BUSY_FILE, BUSY_TTL_S)
+
+
+def touch_warming():
+    """A soloistd pass is running (touched by the sweeper's poll loop)."""
+    _touch(WARMING_FILE)
+
+
+def warming():
+    return _fresh(WARMING_FILE, WARMING_TTL_S)
 
 
 def touch_user_skip():

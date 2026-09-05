@@ -770,7 +770,7 @@ def _box_busy():
             st = json.loads(r.read() or b"{}")
     except Exception:
         return False
-    return bool(st.get("playing") or _hands_on_box()
+    return bool(st.get("playing") or _hands_on_box() or st.get("warming")
                 or (st.get("bt_connected") and not _poweroff_imminent()))
 
 

@@ -183,3 +183,18 @@ n = idle._cycle(0)
 assert idle._cycle(n) is None
 assert not any("soloist-update" in c for c in CALLS2), "no unit (go-librespot box): no slot"
 print("9. updater slot: after the backup, only when its unit exists, a hang never blocks poweroff OK")
+
+# 10. a soloistd pass (4d, AM-69): /status.warming holds auto-off like ssh,
+#     with a HARD release at WARM_HOLD_MAX_S
+import types as _types  # noqa: E402
+PLAYING[0] = False; SSH[0] = False; CALLS.clear()
+WARM = [True]
+idle.boxapi = _types.SimpleNamespace(get=lambda path, timeout=5: {"warming": WARM[0]})
+set_limit(2)
+assert idle._cycle(999999) == 0 and CALLS == [], "a pass holds the box awake"
+idle._warm["since"] = idle.time.monotonic() - idle.WARM_HOLD_MAX_S - 1
+assert idle._cycle(0) == idle.CHECK_S, "past the hard release the hold is gone"
+WARM[0] = False
+assert idle._warm["since"] is None or idle._cycle(0) == idle.CHECK_S
+print("10. warming holds auto-off, hard release at the cap OK")
+

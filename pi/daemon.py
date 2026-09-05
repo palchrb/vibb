@@ -258,6 +258,48 @@ def _kick_soloist_update(why):
         return False
 
 
+_WARM = {"at": 0.0, "val": None}
+
+
+def _warming():
+    """The sidecar's running pass (4d), or None — read at most every 5 s so
+    the screen's 1/s /status poll never queues behind the sidecar."""
+    if paths.GO_UNIT != "vibb-soloistd":
+        return None
+    now = time.monotonic()
+    if now - _WARM["at"] < 5.0:
+        return _WARM["val"]
+    _WARM["at"] = now
+    try:
+        with urllib.request.urlopen(_spotify.API + "/soloist/health", timeout=1) as r:
+            h = json.loads(r.read() or b"{}")
+        w = h.get("warming")
+        # an expired deadline reads as no pass (AM-63)
+        _WARM["val"] = w if (w and (w.get("until") or 0) > time.time()) else None
+    except (OSError, ValueError):
+        _WARM["val"] = None
+    return _WARM["val"]
+
+
+def _warm_abort_wait(why, timeout=10.0):
+    """The kid comes first (AM-65): abort a running pass and wait for the
+    sidecar to hand the child back BEFORE any BT page or play goes out."""
+    if not _warming():
+        return False
+    log(f"warm: aborting the pass ({why})")
+    try:
+        _sidecar_post("/cache/abort", timeout=25)
+    except Exception:
+        pass
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        _WARM["at"] = 0.0
+        if not _warming():
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def _engine_state():
     """The Spotify engine's own verdict (soloistd's spotify_state), or the
     go-librespot-era pair: 'offline' while the supervisor holds the unit
@@ -997,6 +1039,7 @@ class Orchestrator:
                         return {"status": "already-started"}
                 except OSError:
                     pass  # api busy/down — the guards above suffice
+            _warm_abort_wait("play")   # before the page: never "BT paging + wifi" (AM-65)
             _kick_bt_connect()  # pressing play = wanting sound NOW
             # Same card back in the slot (or same link replayed): if its
             # session is still loaded, unpause instead of restarting.
@@ -1594,8 +1637,10 @@ class Orchestrator:
             self.sonos_queue, self.sonos_idx = rows, idx
             self.sonos_ctx = uri
             qlen = resp.get("queue_len")
+            # a listing remembered from a past start (AM-74) may be reordered
+            # since: never trust positional jumps on it — the drift resync heals
             self.sonos_map_trusted = (qlen is None
-                                      or qlen == len(rows))
+                                      or qlen == len(rows)) and not listing.get("stale")
             if not self.sonos_map_trusted:
                 log(f"sonos: queue drift ({qlen} on speaker vs "
                     f"{len(rows)} listed) — positional jumps disabled")
@@ -2716,7 +2761,8 @@ class Orchestrator:
                "spotify_offline": bool(_SPOT_OFFLINE[0]),
                "spotify_state": _engine_state(),
                "session": _SESSION["verdict"] or "pending",
-               "output": current_output()["output"]}
+               "output": current_output()["output"],
+               "warming": bool(_warming())}   # idle.py holds, backup waits (AM-69)
         if source == "sonos":
             # Same keys, same units as the mpv card — that identity IS
             # the "only difference is where the sound comes out" promise.
@@ -6016,6 +6062,7 @@ def main():
     except ValueError:
         pass  # not the main thread (tests run main() in a thread)
     _library.BUSY_CHECK = _audible_now  # the sweep yields to live audio
+    _library.WARM_START = _PS_KICK.set   # a pass starts: wifi power save off under the CDN burst (AM-67)
     threading.Thread(target=_wifi_ps_governor, daemon=True).start()
     # Settle the session verdict in its own thread. It used to hang off
     # the boot-resume thread, which returned early on the common boots

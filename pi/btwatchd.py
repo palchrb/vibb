@@ -383,6 +383,12 @@ class Reconnector:
         YIELD_GIVEUP_S so markers can never starve reconnect."""
         if _radio.uptime() < WIFI_GATE_S and not _radio.wifi_settled():
             hold = True
+        elif _radio.warming():
+            # a soloistd pass is fetching (4d, AM-68): a page now is the
+            # "BT paging + wifi" flap with nothing to gain — hold, bounded
+            # by the marker's own TTL (the sweeper stops touching it when
+            # the pass ends or is aborted)
+            hold = True
         elif (self.disconnected_since is not None
                 and time.monotonic() - self.disconnected_since
                 > YIELD_GIVEUP_S):

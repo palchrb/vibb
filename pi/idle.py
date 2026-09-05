@@ -69,6 +69,26 @@ def daemon_playing():
         return None
 
 
+WARM_HOLD_MAX_S = float(os.environ.get("VIBB_WARM_HOLD_MAX_S", str(25 * 60)))
+_warm = {"since": None}
+
+
+def warming_hold():
+    """A soloistd pass (4d) is fetching: hold auto-off like an ssh session,
+    with a HARD release at WARM_HOLD_MAX_S so an invisible or wedged pass
+    can never keep the box awake forever (AM-44/69)."""
+    try:
+        w = bool(boxapi.get("/status", timeout=5).get("warming"))
+    except (OSError, ValueError, AttributeError):
+        w = False
+    if not w:
+        _warm["since"] = None
+        return False
+    if _warm["since"] is None:
+        _warm["since"] = time.monotonic()
+    return time.monotonic() - _warm["since"] < WARM_HOLD_MAX_S
+
+
 def sonos_playing():
     """Third direct probe for the daemon-down window: a Sonos rendering
     OUR session must hold auto-off — powering the box off kills the
@@ -160,6 +180,8 @@ def _cycle(idle):
             active = True  # someone is pressing buttons — in use
     if not active and ssh_active():
         active = True  # a human is on the box over ssh — hold auto-off
+    if not active and warming_hold():
+        active = True  # a soloistd pass is fetching (4d) — bounded hold
     idle = 0 if active else idle + CHECK_S
     limit = idle_minutes()
     if limit <= 0:

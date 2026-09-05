@@ -184,3 +184,15 @@ print("10. a fresh boot window resets the fail counter OK")
 
 print("BT RADIO YIELD OK — blind pages wait their turn, the player "
       "sees pages coming, and nobody starves.")
+
+# 5. a soloistd pass is fetching (4d, AM-68): the blind page holds even for a
+#    long-absent speaker — until the marker's TTL runs out
+rec.disconnected_since = time.monotonic() - btwatchd.YIELD_GIVEUP_S - 1
+radio.touch_warming()
+assert rec._radio_yield() is True, "warming beats the starvation belt"
+old = time.time() - radio.WARMING_TTL_S - 1
+os.utime(radio.WARMING_FILE, (old, old))          # the sweeper stopped touching it
+assert rec._radio_yield() is False, "a stale warming marker holds nothing"
+rec.disconnected_since = None
+print("5. a soloistd pass holds the page, bounded by the marker's TTL OK")
+
