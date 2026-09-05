@@ -159,6 +159,32 @@ assert post(base, "/cache/abort")[1] == {"aborted": False}
 print("W4. /cache/abort without a pass is a no-op OK")
 p.terminate(); p.wait(5)
 
+# ---- W10: a cached track right after a fetched one (first Zero pass) -------------------
+# the previous file's late tail (AM-81: 17 KB at ~5 s) lands during the next
+# track's dwell; that track is already whole -> 'cached', never 'stalled'
+fresh_fake("fast")
+install_pw_dump("follow", null=True)
+p, base, data = start_sidecar()
+FAKE.tail_b, FAKE.tail_delay_s = 17_000, 0.8
+whole = int(180 * 160 * 125)
+for u in TRACKS[1::2]:                    # t1, t3, t5 already whole on disk
+    open(FAKE._cache_path(u), "wb").write(b"c" * whole)
+    FAKE.cached_uris.add(u)
+wait_state(base, "ok")
+post(base, "/cache/download", {"uri": CTX})
+h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"], 90, "tail pass")
+logtxt = open(p.logpath).read()
+assert h["warm_last"]["result"] == "done", (h["warm_last"], logtxt[-1500:])
+assert "stalled" not in logtxt, logtxt[-1500:]
+ledger = json.load(open(os.path.join(data, "vibb", "ledger.json")))
+assert sorted(ledger[CTX]["warmed"]) == sorted(TRACKS), ledger[CTX]
+assert sorted(u for u, _ in FAKE.fetch_log) == TRACKS[0::2], FAKE.fetch_log
+verdicts = [l.split(": ")[-1] for l in logtxt.splitlines() if "warm: spotify:track:" in l]
+assert verdicts == ["fetched", "cached"] * 3, verdicts
+FAKE.tail_b = 0
+p.terminate(); p.wait(5)
+print("W10. a fetched track's late tail never stalls the cached one after it OK")
+
 # ---- W6: a stalled link ------------------------------------------------------------
 fresh_fake("stall")
 install_pw_dump("follow", null=True)

@@ -102,6 +102,7 @@ WARM_VERIFY_S = 24 * 3600              # a done context is re-verified at most t
 WARM_LEDGER_TTL_S = 30 * 24 * 3600     # Soloist's own eviction is invisible: re-walk after this
 WARM_MAX_STALLS = 3
 PREFETCH_BLOCK_B = 131168              # one 128 KiB block + 96 B header: the next item's prefetch
+TAIL_MAX_B = 64 * 1024                 # growth below this on an OLD file is a late tail, not a fetch (AM-81: 17 KB)
 
 
 def _load_json(path, default):
@@ -1004,10 +1005,20 @@ class Engine:
             best = 0
             for path, size in now.items():
                 was = before.get(path)
-                if size == PREFETCH_BLOCK_B and was is None:
-                    continue                      # the next item's first block
-                if was is None or size > was:
-                    best = max(best, size - (was or 0))
+                if was is None:
+                    if size == PREFETCH_BLOCK_B:
+                        continue                  # the next item's first block
+                elif size - was < TAIL_MAX_B:
+                    # the PREVIOUS fetch's late tail (AM-81: 17 KB at 5 s) landing
+                    # during this dwell — first Zero pass: every cached track
+                    # right after a fetched one read as 'stalled' on it
+                    continue
+                elif size <= was:
+                    continue
+                # a file that grew is judged WHOLE (a partial from an earlier
+                # play completes with a small delta; the file, not the delta,
+                # must reach `need`)
+                best = max(best, size)
             t = time.monotonic()
             if best > last_size:
                 last_size, last_growth, seen_any = best, t, True

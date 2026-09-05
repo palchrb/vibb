@@ -56,6 +56,8 @@ class FakeSoloist:
         # 4d: the audio cache the sidecar watches
         self.cache_dir = None            # set by start_sidecar (CACHE_DIRECTORY)
         self.fetch_mode = "fast"         # fast | slow | stall | none
+        self.tail_b = 0                  # the Zero: a ~17 KB tail lands ~3 s after the whole file
+        self.tail_delay_s = 1.0          # ... whatever the player does meanwhile (skip included)
         self.cached_uris = set()         # already in the cache: nothing is written
         self.fetch_log = []              # (uri, bytes) per completed fetch
         self._writer = None
@@ -103,6 +105,15 @@ class FakeSoloist:
             if written >= total:
                 self.cached_uris.add(uri)
                 self.fetch_log.append((uri, written))
+                if self.tail_b:
+                    def tail():
+                        time.sleep(self.tail_delay_s)
+                        try:
+                            with open(path, "ab") as tf:
+                                tf.write(b"t" * self.tail_b)
+                        except OSError:
+                            pass
+                    threading.Thread(target=tail, daemon=True).start()
         self._writer = threading.Thread(target=run, daemon=True)
         self._writer.start()
 
