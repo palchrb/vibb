@@ -123,8 +123,13 @@ class FakeSoloist:
             return
         if cmd == "get_state":
             self.send(self.state()); return
-        if cmd == "get_queue" and getattr(self, "mute_queue", False):
-            return                                   # a Soloist that does not answer
+        if cmd == "get_queue":
+            # a QUERY: no command_result, the answer is the queue_changed event
+            # (Soloist docs; confirmed on the Zero 2026-09-05)
+            if getattr(self, "mute_queue", False):
+                return                               # a Soloist that does not answer
+            self._answer_queue()
+            return
         self.send({"type": "command_result", "command": cmd})
         if cmd == "play":
             if msg.get("uri"):
@@ -144,13 +149,14 @@ class FakeSoloist:
             self.volume = msg["volume"]; self.send({"type": "volume_changed", "volume": self.volume})
         elif cmd == "set_shuffle":
             self.send({"type": "options_changed", "options": {"shuffle": msg["enabled"], "repeat": "off", "playback_speed": 1.0}})
-        elif cmd == "get_queue":
-            # Soloist's `previous` is a history stack, most recent first
-            # (PLAN-soloistd: "reversed previous + current + upcoming")
-            prev = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in reversed(range(self.idx))]
-            upc = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in range(self.idx + 1, len(TRACKS))]
-            upc.append({"uid": "ux", "source": "autoplay", "item": C.sample_entity("spotify:track:radio", "R", ["X"], "Y", 1000)})
-            self.send({"type": "queue_changed", "previous": prev, "upcoming": upc})
+
+    def _answer_queue(self):
+        # Soloist's `previous` is a history stack, most recent first
+        # (PLAN-soloistd: "reversed previous + current + upcoming")
+        prev = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in reversed(range(self.idx))]
+        upc = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in range(self.idx + 1, len(TRACKS))]
+        upc.append({"uid": "ux", "source": "autoplay", "item": C.sample_entity("spotify:track:radio", "R", ["X"], "Y", 1000)})
+        self.send({"type": "queue_changed", "previous": prev, "upcoming": upc})
 
 
 FAKE = FakeSoloist()

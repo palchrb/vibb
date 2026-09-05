@@ -69,7 +69,8 @@ WALK_MAX_S = 25.0
 # timeout the daemon reads as "engine down" (Zero 2026-09-05: the Sonos
 # hand-off timed out waiting for the listing)
 CMD_TIMEOUT_S = 4.0
-LISTING_WAIT_S = 2.0   # per leg of a listing ask (ack + queue_changed): worst case 4 s
+LISTING_WAIT_S = 2.0   # for queue_changed after get_queue (Zero: 40 ms); below the daemon's 5 s
+QUERY_COMMANDS = {"get_auth_state", "get_state", "get_queue"}   # answered by an event, never acked
 RESTART_BACKOFF_S = tuple(float(x) for x in os.environ.get(
     "VIBB_SOLOIST_BACKOFF_S", "5,10,20,40,60").split(","))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -650,12 +651,20 @@ class Engine:
     def cmd(self, command, timeout=None, **fields):
         """Send one command; the reply is the command_result/error frame
         (async: state changes arrive as events). Raises OSError when there
-        is no live WebSocket — the dialect's 'unreachable'."""
+        is no live WebSocket — the dialect's 'unreachable'.
+
+        QUERY commands (get_auth_state, get_state, get_queue) get NO
+        command_result — their answer IS the event (Soloist docs, and the
+        Zero 2026-09-05: queue_changed in 40 ms while this waited the full
+        timeout for an ack that never comes — the whole reason the Sonos
+        hand-off's listing overran the daemon's 5 s)."""
         ws = self.ws
         if ws is None:
             raise OSError("soloist websocket not connected")
         since = self.mark()
         ws.send_json({"type": "command", "command": command, **fields})
+        if command in QUERY_COMMANDS:
+            return True, {"type": "command_result", "command": command, "query": True}
         end = time.monotonic() + (CMD_TIMEOUT_S if timeout is None else timeout)
         while True:
             m = self.wait_event("command_result", 0.2, since,
@@ -751,13 +760,15 @@ class Engine:
         if not active or uri != active:
             return {"ready": True, "cached": False, "length": 0, "tracks": []}
         # Bounded: the daemon gives this request 5 s and reads a socket
-        # timeout as 'listing unavailable' — which is how the Sonos hand-off
-        # died on the Zero (2026-09-05) while the same ask over curl answered
-        # 22 tracks a minute earlier. Two short legs (ack, queue_changed);
-        # no answer -> the last good listing for this context, else
-        # ready=false so the daemon's settle poll simply asks again.
+        # timeout as 'listing unavailable' — how the Sonos hand-off died on
+        # the Zero (2026-09-05). get_queue is a query: no ack, the answer is
+        # queue_changed (40 ms on the box). No answer within LISTING_WAIT_S
+        # -> the last good listing for this context, else ready=false so
+        # the daemon's settle poll simply asks again.
+        # Field shape (Zero): `previous` is capped at 10 even with limit=0,
+        # so the listing is the last ten played + current + upcoming.
         since = self.mark()
-        self.cmd("get_queue", limit=0, timeout=LISTING_WAIT_S)
+        self.cmd("get_queue", limit=0)
         q = self.wait_event("queue_changed", LISTING_WAIT_S, since)
         if not q:
             cached = self._listing_cache.get(uri)
