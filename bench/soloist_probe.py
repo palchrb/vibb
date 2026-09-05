@@ -13,6 +13,11 @@ from the ws.addr/ws.port files Soloist writes next to its state. Prints:
                            their sources, the first names
   3. get_queue again    -> is the second answer as fast as the first?
 
+  --raw   also dump, as JSON: the whole context entity from playback_state
+          (does it carry a playlist revision / snapshot id anywhere?), the
+          current item entity, and ONE queue entry — every key Soloist sends,
+          so nothing is guessed about the entity shape.
+
 Owner 2026-09-05: "kan vi ikke teste å spørre soloist direkte?"
 """
 import base64
@@ -139,7 +144,33 @@ def wait(ws, etype, timeout):
     return None, seen
 
 
+def walk_keys(obj, prefix="", out=None, depth=0):
+    """Every key path in a nested dict/list, with a short value preview."""
+    out = [] if out is None else out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            walk_keys(v, f"{prefix}.{k}" if prefix else k, out, depth + 1)
+    elif isinstance(obj, list):
+        if obj:
+            walk_keys(obj[0], prefix + "[0]", out, depth + 1)
+        else:
+            out.append(f"{prefix}: []")
+    else:
+        v = json.dumps(obj)
+        out.append(f"{prefix}: {v if len(v) <= 60 else v[:57] + '...'}")
+    return out
+
+
+def dump(label, obj):
+    print(f"--- {label} ---")
+    for line in walk_keys(obj):
+        print("   ", line)
+    hits = [l for l in walk_keys(obj) if any(w in l.lower() for w in ("snapshot", "revision", "version", "etag", "hash", "updated", "modified"))]
+    print("    revision-like keys:", hits or "NONE")
+
+
 def main():
+    raw = "--raw" in sys.argv[1:]
     try:
         addr = open(os.path.join(DATA_DIR, "ws.addr")).read().strip()
         port = int(open(os.path.join(DATA_DIR, "ws.port")).read().strip())
@@ -162,6 +193,11 @@ def main():
               f"context={(st.get('context') or {}).get('uri')}")
     else:
         print("   no playback_state within 5 s")
+    if raw and st:
+        dump("context entity (playback_state.context)", st.get("context") or {})
+        dump("current item entity (playback_state.item)", st.get("item") or {})
+        other = {k: v for k, v in st.items() if k not in ("context", "item")}
+        dump("the rest of playback_state", other)
 
     for label in ("2. get_queue limit=0", "3. get_queue again"):
         t0 = time.monotonic()
@@ -179,6 +215,10 @@ def main():
         print(f"   previous={len(prev)} upcoming={len(upc)} total={len(prev) + len(upc)} sources={srcs}")
         print("   previous (newest first):", [name_of(e) for e in prev[:5]])
         print("   upcoming:", [name_of(e) for e in upc[:8]])
+        if raw and label.startswith("2.") and (upc or prev):
+            dump("one queue entry (upcoming[0])", (upc or prev)[0])
+            other = {k: v for k, v in q.items() if k not in ("previous", "upcoming")}
+            dump("the rest of queue_changed", other)
 
 
 if __name__ == "__main__":
