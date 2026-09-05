@@ -154,7 +154,18 @@ PKGS=(bluez bluez-alsa-utils libasound2-plugin-bluez alsa-utils curl jq
                                            # picked. From apt, not a vendored
                                            # binary, so both get security
                                            # updates with everything else
-      python3-dbus python3-gi)             # BlueZ D-Bus backend (PLAN-bt-dbus.md)
+      python3-dbus python3-gi              # BlueZ D-Bus backend (PLAN-bt-dbus.md)
+      swig liblgpio-dev)                   # lgpio has no cp313 wheel, so pip
+                                           # builds it (swig + lg headers) —
+                                           # and not only in step 5's own lgpio
+                                           # line: Pi OS points pip at piwheels,
+                                           # whose Adafruit-Blinka wheel is built
+                                           # ON a Pi and therefore requires
+                                           # lgpio, RPi.GPIO, rpi_ws281x (PyPI's
+                                           # does not). The first Trixie box
+                                           # (2026-09-05) died there because
+                                           # these two came from a hidden apt
+                                           # call that had failed silently.
 # Audio stack (PLAN-pipewire-soloist.md): bluealsa (default) or pipewire.
 # The toggle lives in audio-stack.sh; bluealsa's packages stay in PKGS on
 # BOTH stacks — masked, never removed, so an offline rollback always works.
@@ -714,9 +725,8 @@ if [[ $UPDATE -eq 1 ]] || ! /opt/vibb/venv/bin/python3 -c 'import adafruit_pn532
   # falls back to RPi.GPIO, whose edge detection is broken there
   # ('RuntimeError: Failed to add edge detection' from vibb-ui).
   # No prebuilt wheel for this python: pip builds from source, which
-  # needs swig + the lg library headers. Never abort the install on it.
+  # needs swig + the lg library headers (in PKGS). Never abort the install on it.
   if ! /opt/vibb/venv/bin/python3 -c 'import lgpio' 2>/dev/null; then
-    apt-get install -y -qq swig liblgpio-dev >/dev/null 2>&1 || true
     /opt/vibb/venv/bin/pip install --quiet --upgrade lgpio \
       || echo "    WARNING: lgpio build failed — vibb-ui buttons need it (apt install swig liblgpio-dev, then rerun)"
   fi

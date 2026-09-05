@@ -103,3 +103,11 @@ assert "systemctl enable --now go-librespot.service" not in src, \
 assert '[[ $SPOTIFY_ENGINE == golibrespot && ( $GO_CHANGED -eq 1' in src, \
     "go-librespot restart-on-change only under golibrespot"
 print("6. BA_UNIT defined under pipewire; enable + restart via the engine seam OK")
+
+# 7 (field 2026-09-05): lgpio ships no wheel, so pip builds it with swig against
+# liblgpio-dev. Both were fetched by a hidden 'apt-get ... >/dev/null || true'
+# inside step 5, which failed silently on the first Trixie box and left the
+# build with 'swig: No such file or directory'. They belong in PKGS.
+assert "swig liblgpio-dev" in src[:i_loop], "swig + liblgpio-dev in PKGS, before the apt loop"
+assert "apt-get install -y -qq swig liblgpio-dev" not in src, "no hidden apt call for the lgpio build"
+print("7. swig + liblgpio-dev through the visible package loop OK")
