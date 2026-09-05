@@ -1548,7 +1548,8 @@ class Orchestrator:
         else:
             try:
                 listing = _spotify.context_tracks(uri, settle_s=10) or {}
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                log(f"sonos: spotify listing unavailable for {uri} ({e!r})")
                 return {"error": "spotify-listing-unavailable"}
         rows = []
         for t in listing.get("tracks") or []:
@@ -1563,6 +1564,8 @@ class Orchestrator:
                 "image": tr.get("album_cover_url"),
                 "dur_s": (dur / 1000.0) if dur else None})
         if not rows:
+            log(f"sonos: nothing to play for {uri} — listing ready={listing.get('ready')} "
+                f"length={listing.get('length')} rows={len(listing.get('tracks') or [])}")
             return {"error": "nothing-to-play"}
         try:
             go("/player/pause")  # quiesce the box's own session
