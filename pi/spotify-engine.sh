@@ -161,7 +161,11 @@ spotify_engine_apply() {
   # this runs, but never depend on it (soloist implies pipewire anyway)
   AUDIO_STACK="${AUDIO_STACK:-$(audio_stack_peek)}"
   if [[ $SPOTIFY_ENGINE == soloist ]]; then
-    install_if_changed 755 "$SCRIPT_DIR/soloistd.py" "$_SE_ROOT/usr/local/bin/vibb-soloistd" || true
+    local _se_changed=0
+    # a new sidecar file must REPLACE the running one: 'enable --now' leaves
+    # a running unit alone, and the first Zero (2026-09-05 23:00) ran the
+    # old sidecar for an hour after install — /cache/download answered 404
+    install_if_changed 755 "$SCRIPT_DIR/soloistd.py" "$_SE_ROOT/usr/local/bin/vibb-soloistd" && _se_changed=1
     _se_write_soloistd_unit
     _se_write_update_units
     systemctl daemon-reload
@@ -173,6 +177,10 @@ spotify_engine_apply() {
     # failed silently. bluealsa's units live in /usr/lib, so THEY mask.
     systemctl disable --now go-librespot.service >/dev/null 2>&1 || true
     systemctl enable --now vibb-soloistd.service
+    if [[ $_se_changed -eq 1 ]]; then
+      systemctl try-restart vibb-soloistd.service
+      _se_say "soloistd changed — restarted"
+    fi
     systemctl enable --now vibb-soloist-update.timer
     _se_say "soloistd up; go-librespot disabled (rollback: ./install.sh --librespot)"
   else

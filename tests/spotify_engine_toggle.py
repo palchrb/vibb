@@ -100,6 +100,8 @@ assert not re.search(r"^Restart=always", unit, re.M), "a unit Restart=always wou
 # and systemctl refuses to mask those (first Zero 2026-09-05: the mask had
 # failed silently, is-enabled said 'disabled')
 assert "systemctl disable --now go-librespot.service" in calls and "systemctl enable --now vibb-soloistd.service" in calls
+# a changed sidecar file replaces the running one (Zero 2026-09-05 23:00: 404s from the old sidecar for an hour)
+assert calls.index("systemctl try-restart vibb-soloistd.service") > calls.index("systemctl enable --now vibb-soloistd.service"), calls
 assert not any(c.startswith("systemctl mask") for c in calls), "no mask on /etc units"
 assert not any("remove" in c or "purge" in c for c in calls)
 assert "Environment=VIBB_GO_API=http://127.0.0.1:3688" in r.stdout and "Environment=VIBB_GO_UNIT=vibb-soloistd" in r.stdout
