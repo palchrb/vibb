@@ -167,6 +167,15 @@ EOF
 }
 
 _as_write_fragments() {
+  # /run/pipewire: the socket unit creates it (DirectoryMode) owned by ROOT,
+  # and pipewire (User=$PW_USER) then cannot create pipewire-0.lock in it —
+  # 'Permission denied', exit 243/CREDENTIALS, a 2 s restart loop (first Zero
+  # boot 2026-09-05, 106 restarts in 4 min). The rig had a chown by hand
+  # (bench line 361); on a box it is tmpfiles.d, applied at sysinit, which
+  # orders before sockets.target. No RuntimeDirectory= on the service (AM-1).
+  write_if_changed "$_AS_ETC/tmpfiles.d/vibb-pipewire.conf" <<EOF || true
+d /run/pipewire 0750 $PW_USER audio -
+EOF
   write_if_changed "$_AS_ETC/pipewire/pipewire.conf.d/10-vibb.conf" <<'EOF' || true
 # vibb: 44100 everywhere (mpv pins it, SBC runs at it) = no graph resampler;
 # a fat quantum (~46ms) = fewer wakeups on a box with no low-latency need.
@@ -297,14 +306,26 @@ audio_stack_apply() {
     # bad unit) left the box with no A2DP endpoint at all and set -e
     # aborted the install right there — a silent box needing ssh. This
     # way a failure aborts with bluealsa still serving audio.
+    # the runtime dir with the right owner BEFORE the socket unit makes a
+    # root-owned one (tmpfiles.d covers every later boot)
+    [[ -n $_AS_ROOT ]] || systemd-tmpfiles --create --prefix=/run/pipewire >/dev/null 2>&1 || true
     systemctl enable --now pipewire.socket pipewire.service wireplumber.service
     local _try _ok=0
     for _try in 1 2 3 4 5 6 7 8 9 10; do
-      if [[ -S $_AS_ROOT$_AS_SOCK ]] && systemctl is-active --quiet wireplumber.service; then
+      if [[ -S $_AS_ROOT$_AS_SOCK ]] && systemctl is-active --quiet pipewire.service \
+         && systemctl is-active --quiet wireplumber.service; then
         _ok=1; break
       fi
       sleep 1
     done
+    # 'active' for one instant is not up: a pipewire that dies in its first
+    # second (the /run/pipewire owner bug) shows as active-then-failed with
+    # RestartSec=2. Hold for 3 s and look again before trusting it.
+    if [[ $_ok -eq 1 ]]; then
+      sleep 3
+      systemctl is-active --quiet pipewire.service \
+        && systemctl is-active --quiet wireplumber.service || _ok=0
+    fi
     if [[ $_ok -ne 1 ]]; then
       systemctl disable --now pipewire.socket pipewire.service wireplumber.service >/dev/null 2>&1 || true
       _as_say "PipeWire did NOT come up ($_AS_SOCK / wireplumber) — bluealsa left"

@@ -150,6 +150,15 @@ assert not any("remove" in c or "purge" in c for c in calls), "mask, never remov
 enables = [c for c in calls if c.startswith("systemctl enable")]
 assert enables == ["systemctl enable --now pipewire.socket pipewire.service wireplumber.service"], enables
 assert "systemctl daemon-reload" in calls
+# first Zero boot 2026-09-05: the socket unit's DirectoryMode made a ROOT-owned
+# /run/pipewire and pipewire (User=pipewire) died on its lockfile forever.
+# tmpfiles.d owns the dir; the verification wants pipewire.service itself
+# active, and still active 3 s later (RestartSec=2 exposes a crash loop).
+tmpf = open(os.path.join(root, "etc/tmpfiles.d/vibb-pipewire.conf")).read().strip()
+assert tmpf == "d /run/pipewire 0750 pipewire audio -", tmpf
+src_as = open(SH).read()
+assert "systemctl is-active --quiet pipewire.service" in src_as, "pipewire.service itself must be active"
+assert calls.count("systemctl is-active --quiet pipewire.service") >= 2, "checked again after the hold"
 assert calls.index("systemctl daemon-reload") < calls.index(enables[0])
 # PipeWire is proven up BEFORE bluealsa is masked: a failed start must
 # never leave the box with no A2DP endpoint at all
