@@ -51,6 +51,8 @@ class FakeSoloist:
         self.volume = 40
         self.logged_in = True
         self.is_active = True
+        self.login_delay_s = 0.6         # the Zero: 'restoring session' -> 'logged in' ~1 s
+        self._conn_at = 0.0
         # 4d: the audio cache the sidecar watches
         self.cache_dir = None            # set by start_sidecar (CACHE_DIRECTORY)
         self.fetch_mode = "fast"         # fast | slow | stall | none
@@ -125,6 +127,11 @@ class FakeSoloist:
         c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                   b"Sec-WebSocket-Accept: " + acc + b"\r\n\r\n")
         self.conn = c
+        self._conn_at = time.monotonic()
+        # a new socket is a NEW child: its playback starts idle (the session is
+        # restored, the playback is not) and the old child's fetch died with it
+        self._stop_fetch()
+        self.status, self.context, self.idx = "idle", None, 0
         try:
             while True:
                 while len(buf) < 2:
@@ -168,6 +175,18 @@ class FakeSoloist:
     def _handle(self, msg):
         cmd = msg.get("command"); self.received.append(msg)
         if cmd == "get_auth_state":
+            if self.logged_in and time.monotonic() - self._conn_at < self.login_delay_s:
+                # not yet: the session is still being restored; the real
+                # child then pushes auth_state on its own when it is
+                self.send({"type": "auth_state", "logged_in": False, "is_active": False, "device_name": None})
+                def later():
+                    time.sleep(self.login_delay_s)
+                    try:
+                        self.send({"type": "auth_state", "logged_in": self.logged_in, "is_active": self.is_active, "device_name": "FakeBox"})
+                    except OSError:
+                        pass
+                threading.Thread(target=later, daemon=True).start()
+                return
             self.send({"type": "auth_state", "logged_in": self.logged_in, "is_active": self.is_active, "device_name": "FakeBox"})
             return
         if cmd == "get_state":
@@ -250,6 +269,13 @@ def free_port():
 
 def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node"):
     data = data or tempfile.mkdtemp()
+    try:                                   # a "follow" graph tracks THIS sidecar's children
+        doc = json.load(open(PWD_FILE))
+        if isinstance(doc, dict):
+            doc["follow"] = data
+            open(PWD_FILE, "w").write(json.dumps(doc))
+    except (OSError, ValueError):
+        pass
     state = tempfile.mkdtemp()
     with open(os.path.join(state, "output.json"), "w") as f:
         json.dump({"output": "local", "pcm": pcm}, f)
@@ -265,7 +291,8 @@ def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node"):
                FAKE_WS_PORT=str(FAKE.port), FAKE_MODE=mode, VIBB_SOLOIST_BACKOFF_S="0.5,0.5",
                # 4d timing, scaled for a test: quiet 0.5 s, stall 1.5 s, settle 1 s
                VIBB_WARM_TICK_S="0.1", VIBB_WARM_QUIET_S="0.5", VIBB_WARM_STALL_S="1.5",
-               VIBB_WARM_SETTLE_S="1.0", VIBB_WARM_CAP_MIN_S="4")
+               VIBB_WARM_SETTLE_S="1.0", VIBB_WARM_CAP_MIN_S="4",
+               VIBB_SOLOIST_RESTORE_GRACE_S="1.5")   # the fake logs in after 0.6 s
     if key:
         env["SOLOIST_API_KEY"] = key
     else:
@@ -292,7 +319,32 @@ def track_hash(uri):
 # --- a fake pw-dump on PATH: the graph the bind check and the pass read ---
 PWD_FILE = os.path.join(TMP, "pw-dump.json")
 _fake_bin = os.path.join(TMP, "fakebin"); os.makedirs(_fake_bin, exist_ok=True)
-open(os.path.join(_fake_bin, "pw-dump"), "w").write(f"#!/bin/sh\ncat {PWD_FILE}\n")
+# a static graph (a JSON list), or {"follow": <data dir>, "template": [...]}: the
+# stream then sits on whichever node the NEWEST child was started with (-d), the
+# way it does on a box — a pass's restart on vibb_null moves it, the restore moves it back
+open(os.path.join(_fake_bin, "pw-dump"), "w").write(f'''#!/usr/bin/env python3
+import json, os
+doc = json.load(open({PWD_FILE!r}))
+if isinstance(doc, dict):
+    d = doc["follow"]
+    names = sorted(x for x in os.listdir(d) if x.startswith("argv-")) if os.path.isdir(d) else []
+    node = None
+    if names:
+        a = eval(open(os.path.join(d, names[-1])).read())
+        node = a[a.index("-d") + 1] if "-d" in a else None
+    ids = {{o["info"]["props"].get("node.name"): o["id"] for o in doc["template"] if o["type"].endswith("Node")}}
+    out = []
+    for o in doc["template"]:
+        if o["type"].endswith("Link"):
+            if node not in ids:
+                continue                                   # no child yet: no stream, no link
+            o = dict(o, info=dict(o["info"], **{{"input-node-id": ids[node]}}))
+        elif o["id"] == 9 and node not in ids:
+            continue
+        out.append(o)
+    doc = out
+print(json.dumps(doc))
+''')
 os.chmod(os.path.join(_fake_bin, "pw-dump"), 0o755)
 
 
@@ -309,8 +361,13 @@ def graph(linked_to, null=False):
 
 
 def install_pw_dump(linked_to, null=False):
+    """`linked_to`: a sink id for a static graph, or "follow" — the stream on
+    the newest child's node (start_sidecar fills in the data dir)."""
     os.environ["PATH"] = _fake_bin + ":" + os.environ["PATH"]
-    open(PWD_FILE, "w").write(json.dumps(graph(linked_to, null)))
+    if linked_to == "follow":
+        open(PWD_FILE, "w").write(json.dumps({"follow": "", "template": graph(0, null)}))
+    else:
+        open(PWD_FILE, "w").write(json.dumps(graph(linked_to, null)))
 
 
 def get(base, path):

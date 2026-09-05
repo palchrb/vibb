@@ -65,7 +65,7 @@ def fresh_fake(mode="fast"):
 
 # ---- W1: the whole pass --------------------------------------------------------
 fresh_fake("fast")
-install_pw_dump(3, null=True)             # the stream will sit on vibb_null (id 3)
+install_pw_dump("follow", null=True)      # the stream follows the child: bench node, then vibb_null
 p, base, data = start_sidecar()
 wait_state(base, "ok")
 gen0 = health(base)["gen"]
@@ -89,7 +89,12 @@ assert sorted(fetched) == sorted(TRACKS), f"every track dwelled to WHOLE: {fetch
 assert all(n >= 180 * 160 * 125 for _, n in FAKE.fetch_log), FAKE.fetch_log
 wait_state(base, "ok")                    # the restored child settles in a beat
 st = get(base, "/status")[1]
+if not (st["stopped"] is True and st["spotify_state"] == "ok"):
+    print("--- health ---", health(base)); print("--- sidecar log ---"); print(open(p.logpath).read()[-4000:])
 assert st["stopped"] is True and st["spotify_state"] == "ok", "freeze lifted, fresh child idle"
+# three fresh children, each 'not logged in' for a beat while restoring the
+# session: 'starting' inside the grace, never needs-pair (the daemon fast-fails on it)
+assert "needs-pair" not in open(p.logpath).read(), open(p.logpath).read()[-1500:]
 ledger = json.load(open(os.path.join(data, "vibb", "ledger.json")))
 assert sorted(ledger[CTX]["warmed"]) == sorted(TRACKS) and ledger[CTX]["result"] == "done", ledger[CTX]
 assert ledger[CTX]["complete"] is True and ledger[CTX]["fingerprint"]
@@ -127,14 +132,13 @@ p.terminate(); p.wait(5)
 
 # ---- W3: the kid presses play mid-pass ----------------------------------------------
 fresh_fake("slow")
-install_pw_dump(3, null=True)
+install_pw_dump("follow", null=True)
 p, base, data = start_sidecar()
 wait_state(base, "ok")
 gen0 = health(base)["gen"]
 post(base, "/cache/download", {"uri": CTX})
 wait_for(base, lambda h: h["node"] == "vibb_null" and h["warming"], 10, "pass owns the child")
 time.sleep(1.0)
-open(PWD_FILE, "w").write(json.dumps(graph(1, null=True)))   # the kid's stream lands on the bench node
 FAKE.received.clear()
 t0 = time.monotonic()
 code, r = post(base, "/player/play", {"uri": CTX})
@@ -157,7 +161,7 @@ p.terminate(); p.wait(5)
 
 # ---- W6: a stalled link ------------------------------------------------------------
 fresh_fake("stall")
-install_pw_dump(3, null=True)
+install_pw_dump("follow", null=True)
 p, base, data = start_sidecar()
 wait_state(base, "ok")
 post(base, "/cache/download", {"uri": CTX})
@@ -171,7 +175,7 @@ p.terminate(); p.wait(5)
 
 # ---- W7: the child dies mid-pass ---------------------------------------------------
 fresh_fake("slow")
-install_pw_dump(3, null=True)
+install_pw_dump("follow", null=True)
 p, base, data = start_sidecar()
 wait_state(base, "ok")
 post(base, "/cache/download", {"uri": CTX})
@@ -195,7 +199,7 @@ p.terminate(); p.wait(5)
 
 # ---- W9: poweroff imminent ------------------------------------------------------
 fresh_fake("fast")
-install_pw_dump(3, null=True)
+install_pw_dump("follow", null=True)
 p, base, data = start_sidecar()
 wait_state(base, "ok")
 run_dir = [l for l in open("/proc/%d/environ" % p.pid, "rb").read().split(b"\0") if l.startswith(b"VIBB_RUN=")][0][9:].decode()

@@ -181,10 +181,14 @@ assert get(base, "/soloist/health")[1]["bound"] is True, "linked to the pinned n
 post(base, "/player/play", {"uri": CTX}); time.sleep(2.6)
 assert get(base, "/soloist/health")[1]["state"] == "ok"
 p.terminate(); p.wait(5)
-open(PWD_FILE, "w").write(json.dumps(graph(2)))            # linked to the HDMI sink instead
 FAKE.status, FAKE.context = "idle", None
+# the real shape: no stream node until the child plays (lazy) — the start
+# check proves nothing, the first playing event's authoritative one decides
+open(PWD_FILE, "w").write(json.dumps([o for o in graph(1) if o["id"] not in (9, 20)]))
 p, base, data = start_sidecar()
 wait_state(base, "ok")
+assert get(base, "/soloist/health")[1]["bound"] is None, "nothing proven before the stream exists"
+open(PWD_FILE, "w").write(json.dumps(graph(2)))            # the stream lands on the HDMI sink instead
 FAKE.received.clear()
 post(base, "/player/play", {"uri": CTX})
 h = wait_state(base, "audio-unbound", timeout=8)
@@ -253,5 +257,28 @@ wait_state(base, "needs-key")
 assert post(base, "/soloist/pair")[0] == 409
 p.terminate(); p.wait(5)
 print("9. pair: child stopped, --pair stored the session, child back; no key -> 409 OK")
+
+# 10. the restore grace: a fresh child answers logged_in=false while it
+#     restores the stored session (the Zero: ~1 s) — 'starting' inside the
+#     grace (the daemon fast-fails a tap on needs-pair, AM-48); a child that
+#     never logs in is needs-pair once the grace is over
+FAKE.logged_in = False
+try:
+    p, base, data = start_sidecar()
+    t0 = time.monotonic()
+    seen = set()
+    while time.monotonic() - t0 < 4.0:
+        seen.add(get(base, "/soloist/health")[1]["state"])
+        if "needs-pair" in seen:
+            break
+        time.sleep(0.05)
+    dt = time.monotonic() - t0
+    assert "needs-pair" in seen and dt >= 1.2, (seen, dt)          # not before the 1.5 s grace
+    log = open(p.logpath).read()
+    assert "state starting -> needs-pair" in log, log[-800:]        # straight from starting
+    p.terminate(); p.wait(5)
+finally:
+    FAKE.logged_in = True
+print(f"10. restore grace: 'starting' while the session restores, needs-pair after {dt:.1f}s OK")
 
 print("\nall soloist_sidecar checks passed")

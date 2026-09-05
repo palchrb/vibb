@@ -73,6 +73,11 @@ WALK_MAX_S = 25.0
 # timeout the daemon reads as "engine down" (Zero 2026-09-05: the Sonos
 # hand-off timed out waiting for the listing)
 CMD_TIMEOUT_S = 4.0
+# a fresh child restores the stored session a beat after start (the Zero:
+# "restoring session" -> "logged in as" ~1 s) and answers get_auth_state
+# logged_in=false meanwhile; inside this grace that is "starting", not
+# needs-pair — the daemon fast-fails a tap on needs-pair (AM-48)
+RESTORE_GRACE_S = float(os.environ.get("VIBB_SOLOIST_RESTORE_GRACE_S", "8"))
 LISTING_WAIT_S = 2.0   # for queue_changed after get_queue (Zero: 40 ms); below the daemon's 5 s
 QUERY_COMMANDS = {"get_auth_state", "get_state", "get_queue"}   # answered by an event, never acked
 RESTART_BACKOFF_S = tuple(float(x) for x in os.environ.get(
@@ -318,6 +323,8 @@ class Engine:
         self.ledger = _load_json(os.path.join(STORE_DIR, "ledger.json"), {})
         # the pass (4d): one thread, one queue, one abort flag, one freeze
         self.gen = 0                           # child generation: every start bumps it
+        self.child_at = 0.0                    # monotonic start of the current child
+        self._grace_gen = -1                   # the gen whose grace re-derive is scheduled
         self.ws_gen = -1                       # the generation the live socket belongs to
         self.node_override = None              # WARM_NODE while a pass owns the child
         self.warm = None                       # the running pass, or None
@@ -413,6 +420,7 @@ class Engine:
         # says where the KID's sound goes, and every other start follows it
         self.node = node_override or pin or self._node_for(self.current_pcm())
         self.gen += 1
+        self.child_at = time.monotonic()
         self.cache_id = self._ensure_cache_id()
         mb = int(read_settings().get("spotify_cache_gb", 20)) * 1024
         self.z_mb = max(100, mb)
@@ -688,11 +696,30 @@ class Engine:
             self._binding = True
             threading.Thread(target=self._bind_check, args=(True,), daemon=True).start()
 
+    def _derive_after_grace(self, gen):
+        """One re-derive per child at the end of RESTORE_GRACE_S: a child that
+        never logged in is then honestly needs-pair. (Under mirror_lock.)"""
+        if self._grace_gen == gen:
+            return
+        self._grace_gen = gen
+        def run():
+            time.sleep(max(0.0, self.child_at + RESTORE_GRACE_S - time.monotonic()) + 0.05)
+            if self.gen != gen:
+                return
+            with self.mirror_lock:
+                self._derive_state()
+        threading.Thread(target=run, daemon=True).start()
+
     def _derive_state(self):
         if self.state in ("expired", "needs-key", "bad-key"):
             return
         if not self.auth["logged_in"]:
-            self.set_state("needs-pair")
+            if (self.child is not None and self.child.poll() is None
+                    and time.monotonic() - self.child_at < RESTORE_GRACE_S):
+                self.set_state("starting")     # the session is still being restored
+                self._derive_after_grace(self.gen)
+            else:
+                self.set_state("needs-pair")
         elif self.node is None or self.bound is False:
             self.set_state("audio-unbound")
         else:
@@ -912,6 +939,17 @@ class Engine:
         if self.warm and time.monotonic() > self.warm["_until_mono"]:
             raise WarmAborted("budget")
 
+    def _wait_ready(self, timeout, gen=None, abortable=False):
+        """A live socket to the current child AND a restored session: the
+        Zero's child says 'restoring session' and logs in ~1 s after it is
+        up, and a play sent in that window answers 'command requires
+        authentication' (first pass on the Zero, 2026-09-05 23:05)."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self._wait_ws(0.1, gen, abortable) and self.auth.get("logged_in"):
+                return True
+        return False
+
     def _wait_ws(self, timeout, gen=None, abortable=False):
         """A live socket to the CURRENT child (gen None = whatever is current).
         Only the pass itself treats the abort flag as a reason to stop
@@ -1053,8 +1091,8 @@ class Engine:
         self._warm_owned = True                # from here on the finally restores
         self._restart_for("warm", node_override=WARM_NODE, from_pass=True)
         gen = self.gen
-        if not self._wait_ws(15, gen, abortable=True):
-            raise WarmAborted("engine offline")
+        if not self._wait_ready(15, gen, abortable=True):
+            raise WarmAborted("engine not ready")
         self._step(self.cmd, "set_volume", volume=0)
         return gen
 
@@ -1421,7 +1459,7 @@ class Handler(BaseHTTPRequestHandler):
                     # AM-65: the kid comes first — abort, wait for the pass to
                     # hand the child back on the kid's node, then do the thing
                     ENGINE.warm_abort_join(path)
-                    if not ENGINE._wait_ws(10):
+                    if not ENGINE._wait_ready(10):
                         self._send(503, {"error": "engine-unreachable", "detail": "restoring",
                                          "spotify_state": ENGINE.state})
                         return
