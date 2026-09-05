@@ -224,7 +224,7 @@ assert "AFTER: bluealsa.service bluealsad.service" in r.stdout
 r, _ = run("pipewire", tempfile.mkdtemp())
 for line in ("Environment=VIBB_AUDIO_STACK=pipewire",
              "Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire",
-             "Environment=PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }",
+             'Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"',
              "Environment=VIBB_BT_GATE=transport"):
     assert line in r.stdout, line
 assert "AFTER: wireplumber.service" in r.stdout

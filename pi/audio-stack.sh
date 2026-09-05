@@ -87,7 +87,10 @@ audio_stack_unit_env() {
     cat <<EOF
 Environment=VIBB_AUDIO_STACK=pipewire
 Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
-Environment=PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }
+# quoted: systemd splits Environment= on whitespace, so unquoted this became
+# PIPEWIRE_PROPS="{" plus "Invalid environment assignment, ignoring:" for the
+# rest on every daemon-reload (first Zero 2026-09-05) — the AM-5 belt was OFF
+Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"
 Environment=VIBB_BT_GATE=transport
 EOF
   else

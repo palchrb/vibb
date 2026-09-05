@@ -91,7 +91,7 @@ assert any(c.startswith("install ") and c.endswith("/usr/local/bin/vibb-soloistd
 unit = open(os.path.join(root, "etc/systemd/system/vibb-soloistd.service")).read()
 for line in ("User=kid", "EnvironmentFile=-/etc/vibb/soloist.env", "StateDirectory=vibb-soloist",
              "CacheDirectory=vibb-soloist", "Restart=on-failure",
-             "Environment=PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }",
+             'Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"',
              "Environment=VIBB_AUDIO_STACK=pipewire", "After=network-online.target wireplumber.service"):
     assert line in unit, line
 assert not re.search(r"^Restart=always", unit, re.M), "a unit Restart=always would brick-loop exit 10"

@@ -32,7 +32,7 @@ print("1. mpv + go-librespot address the pinned pcm names OK")
 i = stack.index("client.conf.d/10-vibb.conf")
 frag = stack[i:i + 700]
 assert "node.dont-reconnect = true" in frag and "node.dont-fallback  = true" in frag
-assert "Environment=PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }" in stack
+assert 'Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"' in stack
 for unit in ("Description=Vibb orchestration daemon",
              "Description=go-librespot Spotify Connect daemon",
              "Description=Vibb BT reconnect daemon"):
