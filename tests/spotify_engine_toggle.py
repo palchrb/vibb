@@ -90,6 +90,7 @@ assert rec == "soloist"
 assert any(c.startswith("install ") and c.endswith("/usr/local/bin/vibb-soloistd") for c in calls), calls
 unit = open(os.path.join(root, "etc/systemd/system/vibb-soloistd.service")).read()
 for line in ("User=kid", "EnvironmentFile=-/etc/vibb/soloist.env", "StateDirectory=vibb-soloist",
+             "Environment=VIBB_RUN=/run",   # AM-69: the poweroff-imminent marker is root's /run
              "CacheDirectory=vibb-soloist", "Restart=on-failure",
              'Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"',
              "Environment=VIBB_AUDIO_STACK=pipewire", "After=network-online.target wireplumber.service"):

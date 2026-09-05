@@ -111,6 +111,8 @@ EnvironmentFile=-$_SE_ENV
 StateDirectory=vibb-soloist
 CacheDirectory=vibb-soloist
 Environment=VIBB_SOLOISTD_PORT=$SOLOISTD_PORT
+# the daemon/idle markers live under /run (root); the sidecar only reads them (AM-69)
+Environment=VIBB_RUN=/run
 Environment="VIBB_DEVICE_NAME=${DEVICE_NAME:-Vibb}"
 $(audio_stack_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-soloistd

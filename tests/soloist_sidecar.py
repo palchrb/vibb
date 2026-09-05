@@ -298,12 +298,13 @@ assert names == ["pause", "play", "seek", "set_volume", "set_shuffle"], names
 code, r = post(base, "/player/next"); time.sleep(0.2)
 assert get(base, "/status")[1]["track"]["uri"] == TRACKS[4] and get(base, "/status")[1]["pending_track_uri"] is None
 code, listing = get(base, "/context/tracks?uri=" + CTX)
-assert C.LISTING_FIELDS <= set(listing) and listing["ready"] and listing["cached"]
+assert C.LISTING_FIELDS <= set(listing) and listing["ready"]
+assert listing["cached"] == len(listing["tracks"]) == listing["length"], "cached is a COUNT (AM-74)"
 uris = [t["uri"] for t in listing["tracks"]]
 assert uris == TRACKS, uris                       # previous + current + upcoming, autoplay dropped
 assert C.LISTING_ITEM <= set(listing["tracks"][0]) and listing["tracks"][0]["track"]["name"] == "T0"
 code, other = get(base, "/context/tracks?uri=spotify:playlist:other")
-assert other["ready"] and other["tracks"] == [] and other["length"] == 0
+assert other["ready"] and other["tracks"] == [] and other["length"] == 0 and other["cached"] == 0
 # 4b. a Soloist that does not answer get_queue (Zero 2026-09-05: the Sonos
 #     hand-off's listing timed out at the daemon's 5 s): the ask is bounded
 #     and the last good listing for the context is served — fast

@@ -59,7 +59,11 @@ LATCH_FILE = os.path.join(DATA_DIR, "build-expired.latch")
 OUT_FILE = os.path.join(STATE_DIR, "output.json")
 MAC_FILE = os.environ.get("VIBB_BT_FILE", "/etc/vibb/bt-headset")
 BOX_ORIGIN = "go-librespot"          # the dialect's "box started this" value
-RUN_DIR = os.environ.get("VIBB_RUN", "/run/vibb" if os.access("/run", os.W_OK) else "/tmp")
+# The daemon/idle markers (poweroff-imminent, PAGING) live under the ROOT
+# run dir, /run. As $RUN_USER "/run is writable?" is false, so the old
+# default fell to /tmp and _poweroff_imminent() never fired on a box
+# (AM-69). Read-only use here; the unit sets VIBB_RUN=/run explicitly.
+RUN_DIR = os.environ.get("VIBB_RUN", "/run")
 IDLE_RESTART_S = float(os.environ.get("VIBB_SOLOIST_IDLE_RESTART_S", "600"))  # paused this long = idle
 PAIR_MAX_S = float(os.environ.get("VIBB_SOLOIST_PAIR_MAX_S", "180"))
 WALK_MAX_SKIPS = 300                 # a 500-item context is a Web-API job (P2)
@@ -314,6 +318,7 @@ class Engine:
             return False
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
+        self.build = None   # re-read from THIS child's banner (a D1 swap changes it, AM-72)
         for f in ("ws.addr", "ws.port"):
             try:
                 os.remove(os.path.join(DATA_DIR, f))
@@ -827,18 +832,20 @@ class Engine:
         with self.mirror_lock:
             active = (self.pb.get("context") or {}).get("uri")
         if not active or uri != active:
-            return {"ready": True, "cached": False, "length": 0, "tracks": []}
+            return {"ready": True, "cached": 0, "length": 0, "tracks": []}
         tracks, fresh = self._queue_rows()
         if tracks is None:
             cached = self._listing_cache.get(uri)
             if cached:
                 log(f"listing: soloist slow — serving the remembered list ({len(cached)} rows)")
-                return {"ready": True, "cached": True, "length": len(cached), "tracks": cached}
+                return {"ready": True, "cached": len(cached), "length": len(cached), "tracks": cached}
             log("listing: soloist slow and nothing remembered — not ready yet")
-            return {"ready": False, "cached": False, "length": 0, "tracks": []}
+            return {"ready": False, "cached": 0, "length": 0, "tracks": []}
         self._remember(uri, tracks, fresh)
         out = self._listing_cache.get(uri) or tracks
-        return {"ready": True, "cached": True, "length": len(out), "tracks": out}
+        # cached = a COUNT (the fork dialect): the picker computes pending =
+        # cached < length, and a bool made every list "still filling" (AM-74)
+        return {"ready": True, "cached": len(out), "length": len(out), "tracks": out}
 
 ENGINE = Engine()
 
