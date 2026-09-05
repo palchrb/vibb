@@ -400,7 +400,7 @@ the tree and pinned. What is left, by who can answer it:
 
 | Owed | Who |
 |---|---|
-| 4d warming (AM-36..45): the daemon's sweeper drives `/cache/download` as an idempotent ledger walk, invisible in `/status`, autoplay stop, `cache: N` bound | after the bench fact below |
+| 4d warming (AM-36..45): the daemon's sweeper drives `/cache/download` as an idempotent ledger walk, invisible in `/status`, autoplay stop, `cache: N` bound | **draft in §4d (2026-09-05 night) — QA/architect pass next, then code** |
 | the SCREEN popup for `spotify_state` (ui.py) | mockup first, per the UI rule |
 | `hidepid=invisible` on `/proc` (AM-46's mitigation for the `-k` argv) | install.sh, one mount drop-in; decide with the owner |
 | AM-26 boot-fail grace in btwatchd | only if bench B1 shows `NotAvailable` during WirePlumber's init |
@@ -429,6 +429,87 @@ Grounded in tree `33af425`. Every PipeWire/WirePlumber key I am not certain of o
 Design stance in one line: **keep every field-hardened vibb mechanism exactly where it is, and make PipeWire look like ALSA to it.** The migration replaces the *transport owner* (bluealsa → PipeWire/bluez5) and the *pcm slave* (`type bluealsa`/`hw:` → `type pipewire` with a pinned node), and nothing else. The previous architect's ~415 deleted lines came from going native (dropping `reopen_go_output`, `_go_output_rebuild`, half of `set_output`); this design deletes none of that until Phase 4 and even then only bluealsa-specific lines, which is why the test damage shrinks from "5 rewritten + 17 swapped" to "0 rewritten, 4 fixture-swapped, ~9 new".
 
 ---
+
+## 4d — the Soloist sweep (warming), implementation-ready draft — 2026-09-05 night
+
+Written after the first evening on the Zero, from facts, not the bench of 09-03.
+It supersedes the "after the bench fact" placeholders in AM-36..45 where they
+conflict; the amendment numbers below say which. Everything here is CONSUMED
+from Soloist as documented and probed; nothing asks Soloist for what it has no
+command for.
+
+### 4d.0 Facts this design rests on (all measured on the Zero, 2026-09-05)
+
+| # | Fact | Where it came from |
+|---|---|---|
+| F1 | Soloist has NO "fetch without playing". Commands: play/pause/skip_*/seek/set_*/add_to_queue/activate/deactivate + the queries get_auth_state/get_state/get_queue. | docs, `bench/soloist_probe.py` |
+| F2 | `get_queue limit=0` answers in 0.04 s with the ACTIVE queue: `previous` (≤ 10, newest first) + `upcoming` (≤ ~80). Queries are not acked. A second WebSocket client is accepted. | probe, AM-59 |
+| F3 | The whole list is visible only at a context's START (`previous` empty). The sidecar snapshots it there and merges later windows (AM-60). | AM-60 |
+| F4 | Entities carry name, ONE 64 px cover (upgraded to 640 by prefix, AM-61), album, artists, duration_ms. No revision / snapshot id anywhere. | probe `--raw`, AM-61 |
+| F5 | Soloist's audio cache is `$CACHE_DIRECTORY/cache/<2 hex>/<40 hex>.file`, content-addressed, opaque to us — it cannot say "is track X here". 24 files / 58 MB after an evening. | `ls`/`find` on the Zero |
+| F6 | A track that plays on is fetched WHOLE within seconds (2.6–5.4 MB at 160 kbps). A `skip_next` before that leaves a STUB — seven files of exactly 131 168 B (one 128 KiB block + 96 B header), plus 182 KB / 595 KB / 1.4 MB partials from the resume walk's fast skips. So "skip cancels the fetch" = YES, and the stub is not a cached track. | the cache listing |
+| F7 | `spotify_cache_gb` (PWA) reaches Soloist as `-z <MB>` at CHILD START only; `resize_spotify_cache` returns early under soloist (no `GO_CONFIG`), so a PWA change applies at the next child restart, not live. | `pi/soloistd.py:323`, `pi/vibb/output.py`, `pi/vibb/sysinfo.py:112` |
+
+### 4d.1 The rule
+
+A sweep is a SILENT PLAY. There is no other way to warm a Soloist cache. The
+silence is by construction, not by volume: the child is restarted with
+`-d vibb_null` (the null sink from `10-vibb.conf`) for the whole pass, so no
+sample can reach the HAT or a headset whatever the volume, the shroud, or a
+bug does. The AM-38 gate holds on top (never while the box is audible AND
+streaming), and AM-39/40 stay as written.
+
+### 4d.2 One pass, per library entry with `cache` set (AM-45), in library order
+
+1. **Start silent.** Sidecar: child on `vibb_null`, `play uri`, `pause` on the first `track_changed` (the resume walk's own first two steps). `/status` keeps the frozen pre-warm snapshot (AM-36); `/soloist/health.warming` shows the pass.
+2. **Snapshot.** `get_queue limit=0` — order, and every entity → the persistent METADATA store (`meta.json` in `$STATE_DIRECTORY`: uri → {name, artists, cover (640), album, duration}) and the persistent ORDER store per context (uri → [track uris] as last seen at a start). Fingerprint = sha1 of the ordered uris (the first-window truth; lists > ~80 extend as the pass walks).
+3. **Decide.** Ledger entry for the context: {fingerprint, warmed: [uris], build, aborted_at}. Same fingerprint + every uri warmed + same build → done, next entry (this is the owner's "length/fingerprint as a proxy for unchanged", and AM-43's idempotence: the ledger, not `/cache/snapshot`, which stays 404 — the LIBRARY's gate keeps failing open and costs nothing because the sidecar answers "done" from the ledger). Changed fingerprint → diff; only uris not in `warmed` are walked. A new build (D1 swap) empties `warmed` (AM-43).
+4. **Walk.** For each uri to warm: it must be the CURRENT item (skip_next until it is; the resume walk's loop). `play`. Dwell until the cache directory stops growing: poll `os.scandir` of the newest-mtime dir every 250 ms; "fetched" = total bytes unchanged for 1.0 s after having grown; cap 30 s per track (a stall = wifi gone, abort the pass). Then `pause`, mark warmed, persist the ledger, `skip_next`. F6 says a skip BEFORE the growth stops leaves a stub — the dwell is the whole point.
+5. **Stop.** AM-41 as written: after each `track_changed`, `get_queue limit=1`; `source == "autoplay"` or empty `upcoming` ends the context. Pass bounds AM-42 (≤ 100 items, ≤ 20 min, smaller on battery, pacing ≥ 3 s — the dwell IS the pacing).
+6. **Abort.** A play request, `_audible_now() and _streaming_now()` flipping true (AM-38), a headset transport becoming active, low battery, or the idle hold's hard release (AM-44) → `pause`, persist `aborted_at`, restore the child to the real output node, then `/status` unfreezes. The next pass resumes at `aborted_at`.
+7. **End of pass.** Child restarted onto the real output node; the frozen `/status` snapshot lifted; `warming: false`.
+
+### 4d.3 What the daemon drives (AM-37 stands)
+
+The sweeper POSTs `/cache/download {uri}` per entry; under soloist that POST is
+"warm this context now, from the ledger" and returns 202 at once (the pass is
+the sidecar's thread). The sweeper keeps touching BUSY every ≤ 10 s while
+`/soloist/health.warming` is true and POSTs `/cache/abort` when its gate
+flips. `/status.warming: true` for idle.py (AM-44). Nothing else in the daemon
+changes: the metadata store makes `/context/tracks?uri=<any known context>`
+answer from disk when the context is NOT active (today: ready+empty), which
+is what the PWA's picker and the hold on Y need for a list that is not
+playing — the same endpoint, the same shape, no new route.
+
+### 4d.4 Costs and numbers
+
+- One 40 ms query per start; the dwell is bandwidth-bound: 3–5 s per track on
+  home wifi (2.6–5.4 MB), a 22-track list ≈ 1.5 min, RF at the streaming
+  level for that long. On the hotspot the pass runs (owner: hotspot allowed)
+  but the per-track cap catches a stall.
+- Disk: `meta.json` ≈ 400 B per track; 1000 tracks = 0.4 MB. `order.json`
+  ≈ 30 B per track per context. Ledger ≈ 100 B per context.
+- The Soloist cache itself is bounded by `-z` (F7); its eviction is invisible
+  to us, so a warmed uri can be gone. Mitigation: ledger entries older than
+  30 days are re-walked; the owner's "playing offline" is the acceptance test.
+
+### 4d.5 Open items for the QA/architect pass (asked explicitly)
+
+- Q1 Is the cache-growth dwell robust when Soloist prefetches the NEXT track
+  while the current one plays (growth would not stop)? If so the dwell needs
+  "no growth for 1 s OR the growth belongs to a second file".
+- Q2 The child restart onto `vibb_null` and back: two restarts per pass, each
+  a WebSocket reconnect and a `get_auth_state`; is a session state (Connect
+  active device) lost across them? `is_active: false` was observed at rest.
+- Q3 Frozen `/status` (AM-36) versus the bookmarker's 3 s heartbeat and the
+  screen's 1/s poll: any consumer that reads position and expects it to move?
+- Q4 F7 parity: should `spotify_cache_gb` restart the engine unit live under
+  soloist (one `go_unit_cmd("restart")` in `resize_spotify_cache`'s soloist
+  branch), given a restart mid-play is a resume walk?
+- Q5 The order store makes `/context/tracks` answer for a non-active
+  context from disk. `cached: true, ready: true` there means "from the last
+  start" — is any daemon path going to treat that as live and, e.g., hand a
+  stale index to Sonos?
 
 ## A. Topology: system-wide PipeWire + WirePlumber
 
