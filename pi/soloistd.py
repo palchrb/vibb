@@ -572,6 +572,24 @@ class Engine:
             if authoritative:
                 self._binding = False
 
+    def _is_our_stream(self, props):
+        """The child's output stream. Field 2026-09-05: it is node.name
+        "spotify" / application.name "Spotify" — nothing says "soloist", so
+        the old substring match never found it. The child's pid is the
+        authoritative key; the names are the fallback for a dump without
+        application.process.id."""
+        if props.get("media.class") != "Stream/Output/Audio":
+            return False
+        pid = props.get("application.process.id")
+        child = self.child.pid if self.child and self.child.poll() is None else None
+        if pid is not None and child is not None:
+            try:
+                return int(pid) == child
+            except (TypeError, ValueError):
+                pass
+        names = " ".join(str(props.get(k) or "") for k in ("node.name", "application.name", "media.name")).lower()
+        return "spotify" in names or "soloist" in names
+
     def _bind_check_body(self, audio, authoritative):
         time.sleep(2.0 if authoritative else 0.5)
         dump = audio.pw_dump()
@@ -579,8 +597,7 @@ class Engine:
             return                                  # no graph to ask: unknown
         streams = [obj for obj in dump
                    if obj.get("type") == "PipeWire:Interface:Node"
-                   and ((obj.get("info") or {}).get("props") or {}).get("media.class") == "Stream/Output/Audio"
-                   and "soloist" in json.dumps((obj.get("info") or {}).get("props") or {}).lower()]
+                   and self._is_our_stream((obj.get("info") or {}).get("props") or {})]
         if not streams:
             self.bound = None if not authoritative else self.bound
             log("bind check: no soloist stream node yet" + ("" if authoritative else " (lazy?)"))

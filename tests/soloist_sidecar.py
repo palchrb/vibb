@@ -337,7 +337,7 @@ os.chmod(os.path.join(fake_bin, "pw-dump"), 0o755)
 def graph(linked_to):
     return [{"id": 1, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "vibb_bench_node", "media.class": "Audio/Sink"}}},
             {"id": 2, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "alsa_output.hdmi", "media.class": "Audio/Sink"}}},
-            {"id": 9, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "soloist", "application.name": "Spotify Soloist", "media.class": "Stream/Output/Audio"}}},
+            {"id": 9, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "spotify", "application.name": "Spotify", "media.class": "Stream/Output/Audio"}}},  # the real shape (field 2026-09-05): nothing says "soloist"
             {"id": 20, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 9, "input-node-id": linked_to}}]
 
 
