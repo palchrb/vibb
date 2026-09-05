@@ -234,6 +234,12 @@ wireplumber.profiles = {
     hooks.linking.target.find-best    = disabled
   }
 }
+# device.routes.default-sink-volume: WirePlumber starts every NEW sink route
+# at 0.4^3 = 0.064 (-24 dB linear gain), and with routes.state off (AM-22)
+# every sink is new on every boot. First Zero 2026-09-05: HAT 0.064, bluez
+# 0.064, under a 70% stream — "very quiet at 70". Under bluealsa there was no
+# such layer: the engine's volume was the only attenuation. 1.0 restores that;
+# vibb still never writes a node volume (I8).
 wireplumber.settings = {
   linking.allow-moving-streams            = false
   linking.follow-default-target           = false
@@ -243,6 +249,7 @@ wireplumber.settings = {
   device.restore-routes                   = false
   bluetooth.autoswitch-to-headset-profile = false
   bluetooth.use-persistent-storage        = false
+  device.routes.default-sink-volume       = 1.0
 }
 monitor.bluez.properties = {
   bluez5.roles              = [ $WP_ROLES ]

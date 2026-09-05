@@ -126,6 +126,7 @@ for key in ("hooks.linking.target.find-default = disabled",
             "bluez5.dummy-avrcp-player = false",
             "session.suspend-timeout-seconds = 120",
             "linking.follow-default-target           = false",
+            "device.routes.default-sink-volume       = 1.0",
             "main-embedded = {"):
     assert key in frag, f"missing in 50-vibb.conf: {key}"
 assert "policy.linking.standard" not in frag and "policy.default-nodes" not in frag, \
