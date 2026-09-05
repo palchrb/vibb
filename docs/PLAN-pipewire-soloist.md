@@ -400,7 +400,7 @@ the tree and pinned. What is left, by who can answer it:
 
 | Owed | Who |
 |---|---|
-| 4d warming (AM-36..45): the daemon's sweeper drives `/cache/download` as an idempotent ledger walk, invisible in `/status`, autoplay stop, `cache: N` bound | **draft in §4d (2026-09-05 night) — QA/architect pass next, then code** |
+| 4d warming (AM-36..45, decided in §4d.6 as AM-62..81) | **step 2 BUILT 2026-09-05 night: the sidecar core** — `warm_start`/`_warm_run`/`_warm_one`/`_dwell` on `vibb_null` with a generation-checked child, ONE `_restart_for`, frozen-as-stopped `/status`, ledger + order + meta stores (tmp+fsync+replace), size-based dwell with the baseline taken before the fetch, abort-first `/player/*`, `/cache/abort`; pinned in `tests/soloist_warm.py` W1–W9 against the shared fake in `tests/soloist_fakes.py` (a scripted cache writer: fast/slow/stall/already-cached, one-block prefetch that the real file grows from). **Step 3 owed: the daemon/library/idle/btwatchd integration (AM-67..70, AM-74/75, AM-77).** |
 | the SCREEN popup for `spotify_state` (ui.py) | mockup first, per the UI rule |
 | `hidepid=invisible` on `/proc` (AM-46's mitigation for the `-k` argv) | install.sh, one mount drop-in; decide with the owner |
 | AM-26 boot-fail grace in btwatchd | only if bench B1 shows `NotAvailable` during WirePlumber's init |

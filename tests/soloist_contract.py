@@ -50,6 +50,7 @@ ENDPOINTS = {
     "/player/seek": "POST", "/player/volume": "POST",
     "/player/shuffle_context": "POST", "/player/output": "POST",
     "/context/tracks": "GET", "/cache/snapshot": "GET", "/cache/download": "POST",
+    "/cache/abort": "POST",   # soloist-only (4d, AM-65): the daemon's sweeper yields the pass
 }
 BODY = {
     "/player/play": {"uri", "skip_to_uri", "position"},
@@ -119,7 +120,8 @@ TRANSLATE = {
     "/player/output":          "restart the child with the new --pipewire-device (no live reopen)",
     "/context/tracks":         "get_queue limit=0 for the ACTIVE context (80-window); Web API listing is P2",
     "/cache/snapshot":         "404 (no such thing) — library.py fails open",
-    "/cache/download":         "404 — warming (D3) replaces it: play ~2s + skip_next per item on vibb_null",
+    "/cache/download":         "202 {queued} / 200 {done}: the silent pass (4d, AM-62..81) — child on vibb_null, play, dwell per track until the file is whole, ledger",
+    "/cache/abort":            "abort the pass and wait for the child back on the kid's node (AM-65)",
 }
 
 

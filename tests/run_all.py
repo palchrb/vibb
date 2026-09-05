@@ -25,7 +25,7 @@ TIMEOUT_S = int(os.environ.get("VIBB_TEST_TIMEOUT", "180"))
 # Not tests: imported BY tests, or run by hand against a capture file.
 # (sonos_contract.py is imported by two rigs AND self-checks when run
 # standalone — its docstring says so — so it stays in the run.)
-FIXTURES = {"run_all.py", "fake_bluezd.py", "snoop_digest.py"}
+FIXTURES = {"run_all.py", "fake_bluezd.py", "snoop_digest.py", "soloist_fakes.py"}
 
 GREEN, RED, DIM, YELLOW, OFF = (
     ("\033[32m", "\033[31m", "\033[2m", "\033[33m", "\033[0m")
