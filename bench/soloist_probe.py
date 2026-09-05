@@ -33,7 +33,7 @@ def load_ws_class():
             tree = ast.parse(src)
             node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "WS")
             ns = {}
-            exec("import base64, hashlib, json, os, socket, struct, time\n"
+            exec("import base64, errno, hashlib, json, os, random, secrets, socket, ssl, struct, time\n"
                  + ast.get_source_segment(src, node), ns)
             return ns["WS"]
     sys.exit("no soloistd source found")
