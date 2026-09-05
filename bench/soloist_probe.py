@@ -1,42 +1,114 @@
 #!/usr/bin/env python3
 """Ask Soloist DIRECTLY over its WebSocket — no sidecar, no daemon in between.
 
-Run on the box while something plays (as the user vibb-soloistd runs as):
+Run on the box while something plays, as the user vibb-soloistd runs as:
 
     python3 ~/vibb/bench/soloist_probe.py
 
-It reuses the sidecar's own tiny WebSocket client (pulled out of the installed
-vibb-soloistd by source, so nothing else of the sidecar runs), reads the
-port Soloist wrote next to its state, and prints:
+Self-contained: its own minimal RFC 6455 client (stdlib only), the port read
+from the ws.addr/ws.port files Soloist writes next to its state. Prints:
 
-  1. get_state  -> status, track, position, context
-  2. get_queue limit=0 -> how long Soloist took, how many previous/upcoming
-     entries, their sources, and the first few names
+  1. get_state          -> status, track, position, context
+  2. get_queue limit=0  -> how long Soloist took, previous/upcoming counts,
+                           their sources, the first names
+  3. get_queue again    -> is the second answer as fast as the first?
 
 Owner 2026-09-05: "kan vi ikke teste å spørre soloist direkte?"
 """
-import ast
+import base64
+import hashlib
 import json
 import os
+import secrets
+import socket
+import struct
 import sys
 import time
 
-CANDIDATES = ["/usr/local/bin/vibb-soloistd",
-              os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pi", "soloistd.py")]
 DATA_DIR = os.environ.get("VIBB_SOLOIST_DATA", "/var/lib/vibb-soloist")
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-def load_ws_class():
-    for path in CANDIDATES:
-        if os.path.exists(path):
-            src = open(path, encoding="utf-8").read()
-            tree = ast.parse(src)
-            node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "WS")
-            ns = {}
-            exec("import base64, errno, hashlib, json, os, random, secrets, socket, ssl, struct, time\n"
-                 + ast.get_source_segment(src, node), ns)
-            return ns["WS"]
-    sys.exit("no soloistd source found")
+class WSClient:
+    """Text frames only, client-masked as RFC 6455 requires, ping answered."""
+
+    def __init__(self, host, port, timeout=10.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        key = base64.b64encode(secrets.token_bytes(16)).decode()
+        self.sock.sendall((f"GET / HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                           "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                           f"Sec-WebSocket-Key: {key}\r\n"
+                           "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("handshake: connection closed")
+            head += chunk
+        head, _, rest = head.partition(b"\r\n\r\n")
+        self.buf = rest
+        status = head.split(b"\r\n", 1)[0].decode(errors="replace")
+        if " 101 " not in status:
+            raise ConnectionError(f"handshake refused: {status}")
+        want = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        accept = next((l.split(b":", 1)[1].strip().decode() for l in head.split(b"\r\n")
+                       if l.lower().startswith(b"sec-websocket-accept:")), "")
+        if accept != want:
+            raise ConnectionError("handshake: bad Sec-WebSocket-Accept")
+
+    def _send_frame(self, opcode, payload):
+        mask = secrets.token_bytes(4)
+        n = len(payload)
+        hdr = bytes([0x80 | opcode])
+        if n < 126:
+            hdr += bytes([0x80 | n])
+        elif n < 65536:
+            hdr += bytes([0x80 | 126]) + struct.pack("!H", n)
+        else:
+            hdr += bytes([0x80 | 127]) + struct.pack("!Q", n)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(hdr + mask + masked)
+
+    def send_json(self, obj):
+        self._send_frame(0x1, json.dumps(obj).encode())
+
+    def _read_exact(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("connection closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def recv_json(self, timeout=10.0):
+        """The next text frame as JSON (fragments joined); None on a control
+        frame with nothing to say; raises socket.timeout when silent."""
+        self.sock.settimeout(timeout)
+        message = b""
+        while True:
+            b1, b2 = self._read_exact(2)
+            fin, opcode = b1 & 0x80, b1 & 0x0F
+            n = b2 & 0x7F
+            if n == 126:
+                n = struct.unpack("!H", self._read_exact(2))[0]
+            elif n == 127:
+                n = struct.unpack("!Q", self._read_exact(8))[0]
+            mask = self._read_exact(4) if b2 & 0x80 else b""
+            payload = self._read_exact(n)
+            if mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode == 0x9:                       # ping -> pong
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0x8:
+                raise ConnectionError("server closed the websocket")
+            if opcode in (0x1, 0x0):
+                message += payload
+                if fin:
+                    return json.loads(message.decode()) if message else None
+                continue
+            return None                              # pong / binary: ignore
 
 
 def name_of(entry):
@@ -46,13 +118,16 @@ def name_of(entry):
 
 
 def wait(ws, etype, timeout):
+    """The first event of `etype` within timeout, plus every type seen."""
     end = time.monotonic() + timeout
     seen = []
     while time.monotonic() < end:
         try:
             m = ws.recv_json(timeout=max(0.1, end - time.monotonic()))
-        except Exception as e:
-            print(f"   (recv: {e.__class__.__name__}: {e})")
+        except socket.timeout:
+            break
+        except ConnectionError as e:
+            print(f"   (connection: {e})")
             break
         if not m:
             continue
@@ -65,7 +140,6 @@ def wait(ws, etype, timeout):
 
 
 def main():
-    WS = load_ws_class()
     try:
         addr = open(os.path.join(DATA_DIR, "ws.addr")).read().strip()
         port = int(open(os.path.join(DATA_DIR, "ws.port")).read().strip())
@@ -73,11 +147,12 @@ def main():
         sys.exit(f"cannot read {DATA_DIR}/ws.addr|ws.port ({e}) — is vibb-soloistd running, "
                  f"and are you the user it runs as?")
     print(f"soloist websocket at {addr}:{port}")
-    ws = WS(addr, port, timeout=10)
+    ws = WSClient(addr, port, timeout=10)
+    print("connected (Soloist accepts a second client)")
 
     ws.send_json({"type": "command", "command": "get_state"})
     st, seen = wait(ws, "playback_state", 5)
-    print("1. get_state ->", "events seen:", seen)
+    print("1. get_state -> events seen:", seen)
     if st:
         item = st.get("item") or {}
         deco = item.get("decorations") or {}
@@ -88,27 +163,22 @@ def main():
     else:
         print("   no playback_state within 5 s")
 
-    t0 = time.monotonic()
-    ws.send_json({"type": "command", "command": "get_queue", "limit": 0})
-    q, seen = wait(ws, "queue_changed", 10)
-    dt = time.monotonic() - t0
-    print(f"2. get_queue limit=0 -> {dt:.2f}s, events seen: {seen}")
-    if not q:
-        print("   NO queue_changed within 10 s")
-        return
-    prev, upc = q.get("previous") or [], q.get("upcoming") or []
-    srcs = {}
-    for e in prev + upc:
-        srcs[e.get("source")] = srcs.get(e.get("source"), 0) + 1
-    print(f"   previous={len(prev)} upcoming={len(upc)} total={len(prev) + len(upc)} sources={srcs}")
-    print("   previous (newest first):", [name_of(e) for e in prev[:5]])
-    print("   upcoming:", [name_of(e) for e in upc[:8]])
-    # a second ask right away: is the second answer as fast as the first?
-    t0 = time.monotonic()
-    ws.send_json({"type": "command", "command": "get_queue", "limit": 0})
-    q2, seen2 = wait(ws, "queue_changed", 10)
-    print(f"3. get_queue again -> {time.monotonic() - t0:.2f}s, events: {seen2}, "
-          f"total={len((q2 or {}).get('previous') or []) + len((q2 or {}).get('upcoming') or [])}")
+    for label in ("2. get_queue limit=0", "3. get_queue again"):
+        t0 = time.monotonic()
+        ws.send_json({"type": "command", "command": "get_queue", "limit": 0})
+        q, seen = wait(ws, "queue_changed", 10)
+        dt = time.monotonic() - t0
+        print(f"{label} -> {dt:.2f}s, events seen: {seen}")
+        if not q:
+            print("   NO queue_changed within 10 s")
+            continue
+        prev, upc = q.get("previous") or [], q.get("upcoming") or []
+        srcs = {}
+        for e in prev + upc:
+            srcs[e.get("source")] = srcs.get(e.get("source"), 0) + 1
+        print(f"   previous={len(prev)} upcoming={len(upc)} total={len(prev) + len(upc)} sources={srcs}")
+        print("   previous (newest first):", [name_of(e) for e in prev[:5]])
+        print("   upcoming:", [name_of(e) for e in upc[:8]])
 
 
 if __name__ == "__main__":
