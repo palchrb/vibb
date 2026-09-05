@@ -177,6 +177,20 @@ def _deco(ent):
 _COVER_RANK = {"xlarge": 4, "large": 3, "medium": 2, "small": 1, "xsmall": 0}
 
 
+# Spotify's image CDN encodes the size in the id's prefix; the hash after it
+# is the same image (Zero 2026-09-05: the 64 px url with the prefix swapped to
+# b273 answered 200, 85 KB). Soloist hands out ONE cover, size "small" = 64 px.
+_COVER_SIZE_PREFIX = {"ab67616d00004851": "ab67616d0000b273",   # 64  -> 640
+                      "ab67616d00001e02": "ab67616d0000b273"}   # 300 -> 640
+
+
+def _full_size(url):
+    for small, big in _COVER_SIZE_PREFIX.items():
+        if small in url:
+            return url.replace(small, big, 1)
+    return url
+
+
 def _largest_cover(cover):
     """Soloist's cover[] lists several sizes; cover[0] gave the PWA a thumbnail
     where go-librespot's art was full size (owner 2026-09-05). Prefer the
@@ -195,7 +209,7 @@ def _largest_cover(cover):
         key = (w, _COVER_RANK.get(str(c.get("size") or "").lower(), -1), i)
         if best_key is None or key > best_key:
             best, best_key = url, key
-    return best
+    return _full_size(best) if best else best
 
 
 def entity_to_track(ent, position_ms=0):

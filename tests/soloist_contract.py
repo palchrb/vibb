@@ -225,7 +225,15 @@ def cover_check():
     assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/l.jpg", "size label when no width"
     _ent["decorations"]["visual_identity"]["cover"] = [{"url": "https://i/1.jpg"}, {"url": "https://i/2.jpg"}]
     assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/2.jpg", "last entry when nothing else"
-    print("7. album art: largest cover wins OK")
+    # 7b. Soloist hands out ONE 64 px cover (field 2026-09-05, entity dump);
+    #     the CDN id's size prefix is swapped for the 640 px one (verified 200)
+    _ent["decorations"]["visual_identity"]["cover"] = [
+        {"url": "https://i.scdn.co/image/ab67616d0000485138cbf072f55c6d516701bd15", "size": "small"}]
+    assert _sd.entity_to_track(_ent)["album_cover_url"] == \
+        "https://i.scdn.co/image/ab67616d0000b27338cbf072f55c6d516701bd15"
+    _ent["decorations"]["visual_identity"]["cover"] = [{"url": "https://i.scdn.co/image/other-scheme"}]
+    assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i.scdn.co/image/other-scheme", "unknown ids untouched"
+    print("7. album art: largest cover wins, 64 px ids upgraded to 640 OK")
     # 8. artist_names are strings, always: a creator without an identity name
     #    (Zero 2026-09-05) must be dropped, not passed as None to the screen UI
     _ent = sample_entity("spotify:track:d", "N", ["A"], "L", 1000)
