@@ -517,6 +517,7 @@ systemctl enable --now bluetooth.service
 # and the rollback between them. Everything in audio-stack.sh.
 audio_stack_apply
 
+BA_UNIT=""   # stays empty under pipewire (set -u: the block below reads it)
 if [[ $AUDIO_STACK == bluealsa ]]; then  # the keep-alive is a bluealsa knob
 # A2DP transport keep-alive: stock bluealsa tears the transport down the
 # instant the last PCM client closes ('keep-alive: 0 ms' in the journal),
@@ -529,7 +530,6 @@ if [[ $AUDIO_STACK == bluealsa ]]; then  # the keep-alive is a bluealsa knob
 # (0 disables). A live-but-silent transport keeps the radio out of sleep,
 # so this is a small standing battery cost — hence not maxed out.
 BT_KEEPALIVE="${VIBB_BT_KEEPALIVE:-120}"
-BA_UNIT=""
 for u in bluealsa.service bluealsad.service; do
   systemctl cat "$u" >/dev/null 2>&1 && BA_UNIT="$u" && break
 done
@@ -1329,7 +1329,10 @@ echo "==> [6/8] Enabling services (restarting only what changed)..."
 chmod 644 /etc/systemd/system/vibb-*.service \
   /etc/systemd/system/go-librespot.service 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable --now go-librespot.service vibb-bt-reconnect.service vibb-mpris.service \
+# the Spotify engine chosen by spotify_engine_apply — never go-librespot by
+# name: under --soloist it is masked, and enabling a masked unit fails
+# the whole call (and, under set -e, the install)
+systemctl enable --now "$(spotify_engine_unit).service" vibb-bt-reconnect.service vibb-mpris.service \
   vibb-buttons.service vibb-daemon.service vibb-idle.service \
   vibb-chargefollow.service vibb-sonos.service
 # One-time migration: earlier installs enabled vibb-rfid before the PN532
@@ -1343,7 +1346,7 @@ if [[ ! -f /var/lib/vibb/.rfid-opt-in ]]; then
     echo "      sudo systemctl enable --now vibb-rfid"
   fi
 fi
-[[ $GO_CHANGED -eq 1 || ${GO_RESTART_NEEDED:-0} -eq 1 ]] && { echo "    go-librespot changed — restarting"; systemctl restart go-librespot.service; }
+[[ $SPOTIFY_ENGINE == golibrespot && ( $GO_CHANGED -eq 1 || ${GO_RESTART_NEEDED:-0} -eq 1 ) ]] && { echo "    go-librespot changed — restarting"; systemctl restart go-librespot.service; }
 [[ $RECON_CHANGED -eq 1 ]] && { echo "    bt-reconnect changed — restarting"; systemctl restart vibb-bt-reconnect.service; }
 [[ ${MPRIS_CHANGED:-0} -eq 1 ]] && { echo "    mpris bridge changed — restarting"; systemctl restart vibb-mpris.service; }
 [[ $IDLE_CHANGED  -eq 1 ]] && { echo "    idle daemon changed — restarting"; systemctl restart vibb-idle.service; }

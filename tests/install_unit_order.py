@@ -89,3 +89,17 @@ assert "VIBB_SPOTIFY_ENGINE_FILE:-/etc/vibb/spotify-engine" in extra and \
 print("6. extra.sh reads the same stack + engine files OK")
 
 print("\nall install_unit_order checks passed")
+
+# 6 (field 2026-09-05, a fresh Zero under --pipewire --soloist): the keep-alive
+# block is bluealsa-only but its BA_UNIT is read outside the guard, so under
+# set -u a pipewire install died with 'BA_UNIT: unbound variable'; and the
+# final enable named go-librespot, which spotify_engine_apply had just masked
+i_guard = src.index('if [[ $AUDIO_STACK == bluealsa ]]; then  # the keep-alive')
+assert 'BA_UNIT=""' in src[i_guard - 200:i_guard], "BA_UNIT defaulted before the bluealsa guard"
+i_en = src.index('systemctl enable --now "$(spotify_engine_unit).service"')
+assert i_en > src.index("\nspotify_engine_apply\n"), "enable after the engine choice"
+assert "systemctl enable --now go-librespot.service" not in src, \
+    "the final enable must go through the engine seam (masked under soloist)"
+assert '[[ $SPOTIFY_ENGINE == golibrespot && ( $GO_CHANGED -eq 1' in src, \
+    "go-librespot restart-on-change only under golibrespot"
+print("6. BA_UNIT defined under pipewire; enable + restart via the engine seam OK")
