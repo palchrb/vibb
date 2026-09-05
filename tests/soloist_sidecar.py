@@ -43,6 +43,7 @@ TMP = tempfile.mkdtemp()
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 CTX = "spotify:playlist:p"
 TRACKS = [f"spotify:track:t{i}" for i in range(6)]
+PREV_CAP = 2   # Soloist keeps only the last N played in get_queue's `previous` (10 on the box)
 
 
 # --- the fake Soloist: an RFC6455 server scripted per command --------------
@@ -154,6 +155,7 @@ class FakeSoloist:
         # Soloist's `previous` is a history stack, most recent first
         # (PLAN-soloistd: "reversed previous + current + upcoming")
         prev = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in reversed(range(self.idx))]
+        prev = prev[:PREV_CAP]   # the box caps the history at 10 (AM-59); 2 here, same shape
         upc = [{"uid": f"u{i}", "source": "context", "item": self.item(i)} for i in range(self.idx + 1, len(TRACKS))]
         upc.append({"uid": "ux", "source": "autoplay", "item": C.sample_entity("spotify:track:radio", "R", ["X"], "Y", 1000)})
         self.send({"type": "queue_changed", "previous": prev, "upcoming": upc})
@@ -266,6 +268,9 @@ FAKE.received.clear()
 code, r = post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[3], "position": 45000})
 assert code == 200, r
 cmds = [(m["command"], m.get("volume"), m.get("position_ms")) for m in FAKE.received]
+# the walk's CONTROL sequence: the get_queue snapshot at the start (AM-60) is
+# a query riding along, not a control step
+cmds = [c for c in cmds if c[0] != "get_queue"]
 names = [c[0] for c in cmds]
 assert names[0] == "set_volume" and cmds[0][1] == 0, cmds
 assert names[1] == "play" and names[2] == "pause", names
@@ -278,6 +283,11 @@ assert st["track"]["uri"] == TRACKS[3] and 45000 <= st["track"]["position"] < 47
 assert st["paused"] is False and st["stopped"] is False and st["play_origin"] == "go-librespot"
 assert st["track"]["name"] == "T3" and st["track"]["artist_names"] == ["A"] and st["track"]["duration"] == 180000
 print("3. resume walk under the shroud lands on the target at the position; box origin OK")
+# AM-60: the walk skipped past t0..t2 and the fake's history keeps only 2, yet
+# the listing is the WHOLE list — remembered at the context's start
+code, walked = get(base, "/context/tracks?uri=" + CTX)
+assert [x["uri"] for x in walked["tracks"]] == TRACKS, [x["uri"] for x in walked["tracks"]]
+print("3a. after a resume walk to track 4 the listing is still the whole list (remembered at start) OK")
 
 # 4. controls, pending, listing, cache 404s
 FAKE.received.clear()

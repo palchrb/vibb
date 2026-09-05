@@ -725,6 +725,10 @@ class Engine:
             if not ok:
                 return ok, r
             self.wait_event("track_changed", 15, since)
+            # the whole list is visible NOW (previous empty, upcoming = the
+            # rest): remember it before the walk's skips push the first
+            # tracks out of Soloist's 10-deep history (AM-60)
+            self._snapshot_listing(uri)
             if target:
                 self.cmd("pause")
                 t0 = time.monotonic()
@@ -750,37 +754,22 @@ class Engine:
             if shroud is not None:
                 self.cmd("set_volume", volume=int(shroud))
 
-    def listing(self, uri):
-        """/context/tracks for the ACTIVE context from get_queue (the 80
-        window). Another context: ready but empty — the daemon's
-        'spotify-listing-unavailable' path; the full picker is P2."""
+    def _queue_rows(self):
+        """One get_queue: (tracks in play order, fresh_start) or (None, False)
+        when queue_changed did not come within LISTING_WAIT_S. `previous` is
+        a history stack, most recent first — reversed it is chronological;
+        it is capped at 10 on the box (AM-59), which is why the caller
+        REMEMBERS lists instead of trusting one window."""
         with self.mirror_lock:
-            active = (self.pb.get("context") or {}).get("uri")
             cur = self.pb.get("item")
-        if not active or uri != active:
-            return {"ready": True, "cached": False, "length": 0, "tracks": []}
-        # Bounded: the daemon gives this request 5 s and reads a socket
-        # timeout as 'listing unavailable' — how the Sonos hand-off died on
-        # the Zero (2026-09-05). get_queue is a query: no ack, the answer is
-        # queue_changed (40 ms on the box). No answer within LISTING_WAIT_S
-        # -> the last good listing for this context, else ready=false so
-        # the daemon's settle poll simply asks again.
-        # Field shape (Zero): `previous` is capped at 10 even with limit=0,
-        # so the listing is the last ten played + current + upcoming.
         since = self.mark()
         self.cmd("get_queue", limit=0)
         q = self.wait_event("queue_changed", LISTING_WAIT_S, since)
         if not q:
-            cached = self._listing_cache.get(uri)
-            if cached:
-                log(f"listing: soloist slow — serving the last good listing ({len(cached)} rows)")
-                return {"ready": True, "cached": True, "length": len(cached), "tracks": cached}
-            log("listing: soloist slow and nothing cached — not ready yet")
-            return {"ready": False, "cached": False, "length": 0, "tracks": []}
-        # `previous` is a history stack, most recent first — reversed it is
-        # chronological (PLAN-soloistd kill 2; confirm on the bench, B9)
-        rows = [e.get("item") for e in reversed(q.get("previous") or [])
+            return None, False
+        prev = [e.get("item") for e in reversed(q.get("previous") or [])
                 if e.get("source") == "context"]
+        rows = list(prev)
         if cur:
             rows.append(cur)
         rows += [e.get("item") for e in (q.get("upcoming") or []) if e.get("source") == "context"]
@@ -789,9 +778,53 @@ class Engine:
             tr = entity_to_track(ent)
             if tr:
                 tracks.append({"uri": tr["uri"], "track": tr})
-        self._listing_cache = {uri: tracks}   # one context at a time
-        return {"ready": True, "cached": True, "length": len(tracks), "tracks": tracks}
+        return tracks, not prev
 
+    def _remember(self, uri, tracks, fresh_start):
+        """AM-60 (owner 2026-09-05): the list seen at a context's START is
+        the whole list (up to Soloist's window); later windows lose the
+        first tracks to the 10-deep history. So a fresh start (no previous)
+        SEEDS the remembered list for that uri; any later window only
+        appends tracks not seen yet (lists longer than the window grow as
+        they play). One context remembered at a time."""
+        seed = self._listing_cache.get(uri)
+        if fresh_start or not seed:
+            self._listing_cache = {uri: list(tracks)}
+            return
+        known = {t["uri"] for t in seed}
+        extra = [t for t in tracks if t["uri"] not in known]
+        if extra:
+            self._listing_cache = {uri: seed + extra}
+
+    def _snapshot_listing(self, uri):
+        try:
+            tracks, fresh = self._queue_rows()
+        except OSError:
+            return
+        if tracks is not None:
+            self._remember(uri, tracks, fresh)
+            log(f"listing: remembered {len(tracks)} rows for {uri} at start")
+
+    def listing(self, uri):
+        """/context/tracks for the ACTIVE context: the list REMEMBERED from
+        its start (AM-60), refreshed by one bounded get_queue (AM-59) so a
+        list longer than the window keeps growing. Another context: ready
+        but empty — the daemon's 'spotify-listing-unavailable' path."""
+        with self.mirror_lock:
+            active = (self.pb.get("context") or {}).get("uri")
+        if not active or uri != active:
+            return {"ready": True, "cached": False, "length": 0, "tracks": []}
+        tracks, fresh = self._queue_rows()
+        if tracks is None:
+            cached = self._listing_cache.get(uri)
+            if cached:
+                log(f"listing: soloist slow — serving the remembered list ({len(cached)} rows)")
+                return {"ready": True, "cached": True, "length": len(cached), "tracks": cached}
+            log("listing: soloist slow and nothing remembered — not ready yet")
+            return {"ready": False, "cached": False, "length": 0, "tracks": []}
+        self._remember(uri, tracks, fresh)
+        out = self._listing_cache.get(uri) or tracks
+        return {"ready": True, "cached": True, "length": len(out), "tracks": out}
 
 ENGINE = Engine()
 
