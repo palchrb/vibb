@@ -5689,6 +5689,13 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def _redirect(self):
         host = self.request.getsockname()[0]  # our address on that network
+        # A browser that typed http://vibbe.local must land on the .local
+        # ORIGIN, not the IP: the PWA stores the box token per origin, so
+        # the IP form is "not linked" (owner 2026-09-05). Captive probes
+        # carry foreign hosts (connectivitycheck.gstatic.com) and keep the IP.
+        asked = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+        if asked.endswith(".local") and all(c.isalnum() or c in ".-" for c in asked):
+            host = asked
         self.send_response(302)
         self.send_header("Location", f"http://{host}:{PORT}/")
         self.send_header("Content-Length", "0")
