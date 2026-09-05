@@ -226,6 +226,16 @@ def cover_check():
     _ent["decorations"]["visual_identity"]["cover"] = [{"url": "https://i/1.jpg"}, {"url": "https://i/2.jpg"}]
     assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/2.jpg", "last entry when nothing else"
     print("7. album art: largest cover wins OK")
+    # 8. artist_names are strings, always: a creator without an identity name
+    #    (Zero 2026-09-05) must be dropped, not passed as None to the screen UI
+    _ent = sample_entity("spotify:track:d", "N", ["A"], "L", 1000)
+    _ent["decorations"]["creators"] = [
+        {"entity": {"uri": "spotify:artist:1", "decorations": {"identity": {"name": "A"}}}},
+        {"entity": {"uri": "spotify:artist:2", "decorations": {"identity": {}}}},
+        {"entity": {"uri": "spotify:artist:3"}},
+        {"entity": {"uri": "spotify:artist:4", "decorations": {"identity": {"name": None}}}}]
+    assert _sd.entity_to_track(_ent)["artist_names"] == ["A"]
+    print("8. artist_names: strings only, nameless creators dropped OK")
     return True
 
 

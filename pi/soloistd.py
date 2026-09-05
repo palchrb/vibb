@@ -202,9 +202,13 @@ def entity_to_track(ent, position_ms=0):
     parent = ((d.get("parent") or {}).get("entity") or {})
     return {"uri": ent["uri"],
             "name": (d.get("identity") or {}).get("name"),
-            "artist_names": [((c.get("entity") or {}).get("decorations") or {})
-                             .get("identity", {}).get("name")
-                             for c in (d.get("creators") or [])],
+            # strings only: a creator without an identity name gave the screen
+            # UI a None in the list and ", ".join() crashed vibb-ui in a loop
+            # (Zero 2026-09-05)
+            "artist_names": [n for n in (((c.get("entity") or {}).get("decorations") or {})
+                                         .get("identity", {}).get("name")
+                                         for c in (d.get("creators") or []))
+                             if isinstance(n, str) and n],
             "album_cover_url": cover_url,
             "album_name": (_deco(parent).get("identity") or {}).get("name"),
             "position": int(position_ms),
