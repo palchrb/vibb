@@ -95,7 +95,11 @@ for line in ("User=kid", "EnvironmentFile=-/etc/vibb/soloist.env", "StateDirecto
              "Environment=VIBB_AUDIO_STACK=pipewire", "After=network-online.target wireplumber.service"):
     assert line in unit, line
 assert not re.search(r"^Restart=always", unit, re.M), "a unit Restart=always would brick-loop exit 10"
-assert "systemctl mask --now go-librespot.service" in calls and "systemctl enable --now vibb-soloistd.service" in calls
+# disable, not mask: go-librespot.service is OUR file in /etc/systemd/system
+# and systemctl refuses to mask those (first Zero 2026-09-05: the mask had
+# failed silently, is-enabled said 'disabled')
+assert "systemctl disable --now go-librespot.service" in calls and "systemctl enable --now vibb-soloistd.service" in calls
+assert not any(c.startswith("systemctl mask") for c in calls), "no mask on /etc units"
 assert not any("remove" in c or "purge" in c for c in calls)
 assert "Environment=VIBB_GO_API=http://127.0.0.1:3688" in r.stdout and "Environment=VIBB_GO_UNIT=vibb-soloistd" in r.stdout
 assert "VIBB_GO_CONFIG" not in r.stdout.split("GOCONF:")[1], "no GO_CONFIG under soloist (AM-53)"
@@ -107,7 +111,7 @@ assert "OnBootSec=" in timer and "OnUnitActiveSec=" in timer, "monotonic timer"
 assert not re.search(r"^(OnCalendar|Persistent)=", timer, re.M), \
     "never a calendar timer: it would fire at boot on the RTC-less bogus clock (AM-50)"
 assert "systemctl enable --now vibb-soloist-update.timer" in calls
-print("3. soloist: sidecar installed, unit shaped, go-librespot masked, env, no GO_CONFIG OK")
+print("3. soloist: sidecar installed, unit shaped, go-librespot disabled, env, no GO_CONFIG OK")
 print("3b. updater unit + MONOTONIC timer written and enabled OK")
 
 # 4. rollback keeps config.yml byte-identical
@@ -117,10 +121,11 @@ os.remove(os.path.join(root, "systemctl.log"))
 # the file remembers soloist, so the rollback is the EXPLICIT --librespot
 r, calls, rec, _ = run("golibrespot", "pipewire", root=root)
 assert r.returncode == 0 and rec == "golibrespot", (r.stderr, rec)
-assert "systemctl disable --now vibb-soloistd.service" in calls and "systemctl mask vibb-soloistd.service" in calls
+assert "systemctl disable --now vibb-soloistd.service" in calls
+assert not any(c.startswith("systemctl mask") for c in calls), "no mask on /etc units"
 assert "systemctl disable --now vibb-soloist-update.timer" in calls, "the rollback stops the updater"
 assert "systemctl unmask go-librespot.service" in calls
-assert calls.index("systemctl mask vibb-soloistd.service") < calls.index("systemctl unmask go-librespot.service")
+assert calls.index("systemctl disable --now vibb-soloistd.service") < calls.index("systemctl unmask go-librespot.service")
 assert open(cfg).read() == before
 print("4. rollback: sidecar masked, go-librespot back, config.yml untouched OK")
 

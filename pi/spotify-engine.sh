@@ -20,8 +20,8 @@
 #   spotify_engine_apply     soloist: install the sidecar, write
 #                            vibb-soloistd.service, MASK go-librespot (never
 #                            remove), enable the sidecar; golibrespot: the
-#                            rollback — disable+mask the sidecar unit if it
-#                            exists, unmask go-librespot; config.yml is never
+#                            rollback — disable the sidecar unit if it
+#                            exists, re-enable go-librespot; config.yml is never
 #                            touched either way. Records the choice LAST, so a
 #                            failed apply never remembers an engine that is
 #                            not serving.
@@ -164,17 +164,20 @@ spotify_engine_apply() {
     _se_write_update_units
     systemctl daemon-reload
     # two Connect devices for one box is the plan's rejected coexistence:
-    # mask go-librespot, never remove it (rollback = --librespot)
-    systemctl mask --now go-librespot.service >/dev/null 2>&1 || true
+    # disable go-librespot, never remove it (rollback = --librespot). NOT
+    # mask: install.sh writes go-librespot.service INTO /etc/systemd/system,
+    # and systemctl refuses to mask a unit whose file lives there ("already
+    # exists") — the first Zero (2026-09-05) showed 'disabled', the mask had
+    # failed silently. bluealsa's units live in /usr/lib, so THEY mask.
+    systemctl disable --now go-librespot.service >/dev/null 2>&1 || true
     systemctl enable --now vibb-soloistd.service
     systemctl enable --now vibb-soloist-update.timer
-    _se_say "soloistd up; go-librespot masked (rollback: ./install.sh --librespot)"
+    _se_say "soloistd up; go-librespot disabled (rollback: ./install.sh --librespot)"
   else
     if [[ -e $_SE_ETC/systemd/system/vibb-soloistd.service ]]; then
       systemctl disable --now vibb-soloist-update.timer >/dev/null 2>&1 || true
       systemctl disable --now vibb-soloistd.service >/dev/null 2>&1 || true
-      systemctl mask vibb-soloistd.service >/dev/null 2>&1 || true
-      _se_say "soloistd disabled + masked (rollback)"
+      _se_say "soloistd disabled (rollback)"   # same /etc unit: no mask possible
     fi
     systemctl unmask go-librespot.service >/dev/null 2>&1 || true
     # go-librespot's config.yml is never touched by this toggle
