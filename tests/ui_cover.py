@@ -223,3 +223,8 @@ print("8. corrupt disk entry removed, falls back to fetching OK")
 
 print("UI COVER OK — remote off-thread, local fallback never blank, "
       "boot-race failures retry fast, covers persist to disk.")
+
+# a poisoned artist list (None from a pre-fix bookmark) must render, not crash
+# the screen in a restart loop (Zero 2026-09-05)
+render({"source": "spotify", "title": "Song", "spotify": {"artists": [None, "A", ""]}})
+print("poisoned artist list renders OK")

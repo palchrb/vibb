@@ -163,6 +163,13 @@ LAST_FILE = os.path.join(STATE_DIR, "last-play.json")
 VOL_FILE = os.path.join(STATE_DIR, "volume.json")
 
 
+def _names(seq):
+    """Artist lists for /status: strings only. A bookmark or a queue row
+    written before soloistd filtered nameless creators carries None, and
+    the screen's ', '.join() died on it (Zero 2026-09-05)."""
+    return [a for a in (seq or []) if isinstance(a, str) and a]
+
+
 def _local_volume(stored):
     """Volume to USE at a landing, on any output: min(stored, volume_cap)."""
     return _cap_local_volume(stored, load_settings().get("volume_cap", 100))
@@ -2883,7 +2890,7 @@ class Orchestrator:
                           # uri of the loaded track — the song picker
                           # marks the playing row with it (v0.1.1)
                           "track_uri": track.get("uri") or None,
-                          "artists": track.get("artist_names") or [],
+                          "artists": _names(track.get("artist_names")),
                           "album": track.get("album_name") or None,
                           "artwork": track.get("album_cover_url") or None,
                           # v0.0.8: the not-yet-settled skip target while a
@@ -2930,7 +2937,7 @@ class Orchestrator:
             if art:
                 out["artwork"] = art
             out["spotify"]["track"] = pend_t.get("name") or None
-            out["spotify"]["artists"] = pend_t.get("artist_names") or []
+            out["spotify"]["artists"] = _names(pend_t.get("artist_names"))
             out["spotify"]["album"] = pend_t.get("album_name") or None
             if art:
                 out["spotify"]["artwork"] = art
@@ -2980,7 +2987,7 @@ class Orchestrator:
                 out["spotify"] = dict(out["spotify"],
                                       track=(bm or {}).get("name"),
                                       track_uri=(bm or {}).get("uri"),
-                                      artists=(bm or {}).get("artists") or [],
+                                      artists=_names((bm or {}).get("artists")),
                                       album=None,
                                       artwork=out["artwork"])
         # Ghost sessions: nothing is live, but a bookmarked target is

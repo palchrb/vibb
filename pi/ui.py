@@ -3353,7 +3353,10 @@ class App:
                 title, rolls = marquee(title, 20,
                                        t0=self._marquee_t0("now", title))
             d.text((W // 2, ty), title, font=F_MED, fill=FG, anchor="ma")
-            sub = ", ".join((st.get("spotify") or {}).get("artists") or [])
+            # strings only: a bookmark written before the sidecar filtered
+            # nameless creators still carries a None (Zero 2026-09-05, twice)
+            sub = ", ".join(a for a in ((st.get("spotify") or {}).get("artists") or [])
+                            if isinstance(a, str) and a)
             if sub:
                 d.text((W // 2, ty + 22), sub[:30], font=F_SMALL,
                        fill=DIM, anchor="ma")
