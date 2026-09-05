@@ -64,7 +64,12 @@ IDLE_RESTART_S = float(os.environ.get("VIBB_SOLOIST_IDLE_RESTART_S", "600"))  # 
 PAIR_MAX_S = float(os.environ.get("VIBB_SOLOIST_PAIR_MAX_S", "180"))
 WALK_MAX_SKIPS = 300                 # a 500-item context is a Web-API job (P2)
 WALK_MAX_S = 25.0
-CMD_TIMEOUT_S = 8.0
+# Below the daemon's 5 s per request (vibb.spotify.go): a command that Soloist
+# does not ack in time must come back as an error, never as a socket
+# timeout the daemon reads as "engine down" (Zero 2026-09-05: the Sonos
+# hand-off timed out waiting for the listing)
+CMD_TIMEOUT_S = 4.0
+LISTING_WAIT_S = 2.0   # per leg of a listing ask (ack + queue_changed): worst case 4 s
 RESTART_BACKOFF_S = tuple(float(x) for x in os.environ.get(
     "VIBB_SOLOIST_BACKOFF_S", "5,10,20,40,60").split(","))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -225,6 +230,7 @@ class Engine:
         self.ws = None
         self.state = "starting"
         self.auth = {"logged_in": False, "is_active": False, "device_name": None}
+        self._listing_cache = {}   # context uri -> the last good track rows
         self.pb = {"status": "idle", "item": None, "context": None,
                    "position": {"position_ms": 0, "timestamp_ms": 0.0, "speed": 1.0},
                    "volume": None, "options": {"shuffle": False}}
@@ -641,7 +647,7 @@ class Engine:
                 self.events.wait(rem)
 
     # ----- commands -----
-    def cmd(self, command, **fields):
+    def cmd(self, command, timeout=None, **fields):
         """Send one command; the reply is the command_result/error frame
         (async: state changes arrive as events). Raises OSError when there
         is no live WebSocket — the dialect's 'unreachable'."""
@@ -650,7 +656,7 @@ class Engine:
             raise OSError("soloist websocket not connected")
         since = self.mark()
         ws.send_json({"type": "command", "command": command, **fields})
-        end = time.monotonic() + CMD_TIMEOUT_S
+        end = time.monotonic() + (CMD_TIMEOUT_S if timeout is None else timeout)
         while True:
             m = self.wait_event("command_result", 0.2, since,
                                 lambda x: x.get("command") in (command, None))
@@ -744,9 +750,22 @@ class Engine:
             cur = self.pb.get("item")
         if not active or uri != active:
             return {"ready": True, "cached": False, "length": 0, "tracks": []}
+        # Bounded: the daemon gives this request 5 s and reads a socket
+        # timeout as 'listing unavailable' — which is how the Sonos hand-off
+        # died on the Zero (2026-09-05) while the same ask over curl answered
+        # 22 tracks a minute earlier. Two short legs (ack, queue_changed);
+        # no answer -> the last good listing for this context, else
+        # ready=false so the daemon's settle poll simply asks again.
         since = self.mark()
-        self.cmd("get_queue", limit=0)
-        q = self.wait_event("queue_changed", 5, since) or {}
+        self.cmd("get_queue", limit=0, timeout=LISTING_WAIT_S)
+        q = self.wait_event("queue_changed", LISTING_WAIT_S, since)
+        if not q:
+            cached = self._listing_cache.get(uri)
+            if cached:
+                log(f"listing: soloist slow — serving the last good listing ({len(cached)} rows)")
+                return {"ready": True, "cached": True, "length": len(cached), "tracks": cached}
+            log("listing: soloist slow and nothing cached — not ready yet")
+            return {"ready": False, "cached": False, "length": 0, "tracks": []}
         # `previous` is a history stack, most recent first — reversed it is
         # chronological (PLAN-soloistd kill 2; confirm on the bench, B9)
         rows = [e.get("item") for e in reversed(q.get("previous") or [])
@@ -759,6 +778,7 @@ class Engine:
             tr = entity_to_track(ent)
             if tr:
                 tracks.append({"uri": tr["uri"], "track": tr})
+        self._listing_cache = {uri: tracks}   # one context at a time
         return {"ready": True, "cached": True, "length": len(tracks), "tracks": tracks}
 
 

@@ -123,6 +123,8 @@ class FakeSoloist:
             return
         if cmd == "get_state":
             self.send(self.state()); return
+        if cmd == "get_queue" and getattr(self, "mute_queue", False):
+            return                                   # a Soloist that does not answer
         self.send({"type": "command_result", "command": cmd})
         if cmd == "play":
             if msg.get("uri"):
@@ -286,6 +288,25 @@ assert uris == TRACKS, uris                       # previous + current + upcomin
 assert C.LISTING_ITEM <= set(listing["tracks"][0]) and listing["tracks"][0]["track"]["name"] == "T0"
 code, other = get(base, "/context/tracks?uri=spotify:playlist:other")
 assert other["ready"] and other["tracks"] == [] and other["length"] == 0
+# 4b. a Soloist that does not answer get_queue (Zero 2026-09-05: the Sonos
+#     hand-off's listing timed out at the daemon's 5 s): the ask is bounded
+#     and the last good listing for the context is served — fast
+FAKE.mute_queue = True
+t0 = time.monotonic()
+code, again = get(base, "/context/tracks?uri=" + CTX)
+dt = time.monotonic() - t0
+assert code == 200 and again["ready"] and again["cached"] and [x["uri"] for x in again["tracks"]] == TRACKS, again
+assert dt < 4.8, f"the bounded ask must beat the daemon's 5 s: {dt:.1f}s"
+#     a context never listed before, still no answer: not ready, still fast
+FAKE.context = "spotify:playlist:fresh"; FAKE.send(FAKE.state()); time.sleep(0.2)
+t0 = time.monotonic()
+code, fresh = get(base, "/context/tracks?uri=spotify:playlist:fresh")
+dt = time.monotonic() - t0
+assert code == 200 and fresh["ready"] is False and fresh["tracks"] == [], fresh
+assert dt < 4.8, f"{dt:.1f}s"
+FAKE.mute_queue = False
+FAKE.context = CTX; FAKE.send(FAKE.state()); time.sleep(0.2)
+print("4b. a slow Soloist: the last good listing, bounded; unknown context: not-ready, bounded OK")
 assert get(base, "/status")[1]["play_origin"] == "go-librespot"
 FAKE.context = "spotify:album:phone"; FAKE.send(FAKE.state()); time.sleep(0.2)
 assert get(base, "/status")[1]["play_origin"] == "remote", "a context the box did not start = the phone"
