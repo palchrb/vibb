@@ -223,7 +223,7 @@ files under `/var/lib/vibb/cache`; Spotify caches encrypted audio
 ### 8. Moving the box to a new Wi-Fi
 
 A box that finds no known network (and has none saved) starts its own
-setup hotspot **Vibb-<name>** (password `vibb123`); joining it
+setup hotspot **Vibb-<name>** (password `vibb1234`); joining it
 pops a captive portal straight into the PWA, where you pick the new
 network. A box with saved networks: use the PWA's Wi-Fi card while
 it's still on the old network, or the screen's settings.
