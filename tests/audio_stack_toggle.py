@@ -167,6 +167,17 @@ assert calls.index(enables[0]) < calls.index(masks[0]), \
     "enable+verify pipewire, THEN mask bluealsa"
 print("2. pipewire: bench-shaped units + fragments, bluealsa masked, enable order OK")
 
+# 2a. the SAME root again: nothing changes, and apply must still succeed.
+#     Zero 2026-09-05: _as_write_fragments ended in 'write_if_changed && FLAG=1',
+#     so an unchanged fragment made the function return 1 and set -e killed
+#     install.sh silently after the bluetooth enable.
+os.remove(os.path.join(root, "systemctl.log"))
+r, calls = run("pipewire", root)
+assert r.returncode == 0, "second apply on an unchanged root must not die: " + r.stderr[-400:]
+assert "PipeWire system units up" in r.stdout
+assert "systemctl try-restart wireplumber.service" not in calls, "unchanged fragment: no restart"
+print("2a. re-run on an unchanged root succeeds, no wireplumber restart OK")
+
 # 2b. PipeWire fails to come up: the install ABORTS with bluealsa still
 #     serving audio, and the half-started units are disabled again. The
 #     other order (mask first) left the box with no A2DP endpoint at all.

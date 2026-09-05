@@ -279,6 +279,10 @@ monitor.alsa.rules = [
     actions = { update-props = { session.suspend-timeout-seconds = 5  api.alsa.soft-mixer = true  node.pause-on-idle = true } } }
 ]
 EOF
+  # a function's status is its LAST command's: with the fragment unchanged the
+  # 'write_if_changed && FLAG=1' list above is 1 and set -e killed install.sh
+  # silently right after the bluetooth enable (Zero, 2026-09-05, second run)
+  return 0
 }
 
 # The idle units nobody asked for (owner 2026-09-05: "så ikke disse tingene
