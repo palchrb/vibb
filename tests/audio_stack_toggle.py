@@ -98,6 +98,9 @@ print("1. resolve: env > file > default, garbage refused OK")
 
 # 2. pipewire
 root = tempfile.mkdtemp()
+for u in ("pipewire.socket", "pipewire.service", "wireplumber.service"):
+    os.makedirs(os.path.join(root, "usr/lib/systemd/user"), exist_ok=True)
+    open(os.path.join(root, "usr/lib/systemd/user", u), "w").close()
 r, calls = run("pipewire", root)
 assert r.returncode == 0, r.stderr
 assert "pipewire pipewire-bin pipewire-alsa wireplumber libspa-0.2-bluetooth" in r.stdout
@@ -135,7 +138,14 @@ core = open(os.path.join(root, "etc/pipewire/pipewire.conf.d/10-vibb.conf")).rea
 assert 'node.name = "vibb_null"' in core and "default.clock.rate          = 44100" in core
 masks = [c for c in calls if c.startswith("systemctl mask")]
 assert masks == ["systemctl mask --now bluealsa.service",
-                 "systemctl mask --now bluealsad.service"], masks
+                 "systemctl mask --now bluealsad.service",
+                 "systemctl mask --now bluealsa-aplay.service"], masks
+# Debian enables PipeWire in every user session: masked globally, only the
+# units that exist (fake /usr/lib/systemd/user has three of the six)
+gmasks = [c for c in calls if c.startswith("systemctl --global mask")]
+assert gmasks == ["systemctl --global mask pipewire.socket",
+                  "systemctl --global mask pipewire.service",
+                  "systemctl --global mask wireplumber.service"], gmasks
 assert not any("remove" in c or "purge" in c for c in calls), "mask, never remove"
 enables = [c for c in calls if c.startswith("systemctl enable")]
 assert enables == ["systemctl enable --now pipewire.socket pipewire.service wireplumber.service"], enables
@@ -174,8 +184,13 @@ assert disables == ["systemctl disable --now wireplumber.service",
                     "systemctl disable --now pipewire.socket"], disables
 masks = [c for c in calls if c.startswith("systemctl mask")]
 assert masks == ["systemctl mask wireplumber.service", "systemctl mask pipewire.service",
-                 "systemctl mask pipewire.socket"], masks
-assert calls.index(masks[-1]) < calls.index("systemctl unmask bluealsa.service")
+                 "systemctl mask pipewire.socket",
+                 "systemctl mask --now bluealsa-aplay.service"], masks
+assert [c for c in calls if c.startswith("systemctl --global mask")] == [
+    "systemctl --global mask pipewire.socket", "systemctl --global mask pipewire.service",
+    "systemctl --global mask wireplumber.service"], "session PipeWire stays masked under bluealsa too"
+assert calls.index(masks[2]) < calls.index("systemctl unmask bluealsa.service"), \
+    "the pipewire trio is masked before bluealsa comes back"
 assert "systemctl enable --now bluealsa.service" in calls
 assert not os.path.exists(os.path.join(root, "etc/alsa/conf.d/99-pipewire-default.conf"))
 assert os.path.exists(os.path.join(units, "pipewire.service")), \
@@ -187,7 +202,9 @@ root = tempfile.mkdtemp()
 r, calls = run("bluealsa", root)
 assert r.returncode == 0, r.stderr
 assert not os.path.exists(os.path.join(root, "etc/systemd/system/pipewire.service"))
-assert not any(c.startswith("systemctl mask") or c.startswith("systemctl disable") for c in calls), calls
+assert [c for c in calls if c.startswith("systemctl mask") or c.startswith("systemctl disable")] \
+    == ["systemctl mask --now bluealsa-aplay.service"], calls   # the phone->box player, never wanted
+assert not any("--global" in c for c in calls), "no pipewire packages, nothing to mask globally"
 assert "systemctl unmask bluealsa.service" in calls and "systemctl enable --now bluealsa.service" in calls
 assert "pipewire" not in r.stdout.split("ENV:")[0].replace("audio stack: bluealsa", "")
 print("4. bluealsa on a clean box: no pipewire artefact, no mask OK")

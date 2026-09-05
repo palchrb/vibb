@@ -260,6 +260,27 @@ monitor.alsa.rules = [
 EOF
 }
 
+# The idle units nobody asked for (owner 2026-09-05: "så ikke disse tingene
+# ligger og bruker ressurser i bakgrunnen"):
+#  - bluealsa-aplay plays a PHONE's A2DP stream into the box. Debian enables
+#    it on bluetooth.target with Restart=on-failure and no dependency on the
+#    daemon, so under pipewire it sits restarting against a masked bluealsa.
+#    Masked on both stacks; vibb never receives audio from a phone.
+#  - Debian's pipewire packages enable PipeWire + WirePlumber in every USER
+#    session (systemd --user default.target). An ssh login would then start
+#    a SECOND WirePlumber that registers its own A2DP endpoints with BlueZ
+#    and grabs the HAT — against the system instance under pipewire, against
+#    bluealsa under bluealsa. Masked globally whenever the packages exist.
+_as_mask_idle_units() {
+  systemctl mask --now bluealsa-aplay.service >/dev/null 2>&1 || true
+  local u
+  for u in pipewire.socket pipewire.service pipewire-pulse.socket \
+           pipewire-pulse.service wireplumber.service filter-chain.service; do
+    [[ -e $_AS_ROOT/usr/lib/systemd/user/$u ]] || continue
+    systemctl --global mask "$u" >/dev/null 2>&1 || true
+  done
+}
+
 audio_stack_apply() {
   local u
   if [[ $AUDIO_STACK == pipewire ]]; then
@@ -296,6 +317,7 @@ audio_stack_apply() {
     for u in bluealsa.service bluealsad.service; do
       systemctl mask --now "$u" >/dev/null 2>&1 || true
     done
+    _as_mask_idle_units
     _as_say "PipeWire system units up; bluealsa masked (rollback: VIBB_AUDIO_STACK=bluealsa ./install.sh)"
   else
     if [[ -e $_AS_ETC/systemd/system/pipewire.service ]]; then
@@ -314,6 +336,7 @@ audio_stack_apply() {
     done
     systemctl enable --now bluealsa.service 2>/dev/null \
       || systemctl enable --now bluealsad.service
+    _as_mask_idle_units
   fi
 }
 

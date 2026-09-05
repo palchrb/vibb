@@ -388,6 +388,8 @@ The full pass is Appendix D. What it changed, by ID:
 
 ### Branch state, 2026-09-04 evening (36 commits over `main`, suite 176 files green)
 
+> **2026-09-05 (first Zero install, AM-57):** `--pipewire --soloist` on a fresh Trixie Lite died twice in install.sh: `BA_UNIT: unbound variable` (bluealsa-only block read outside its guard under `set -u`), and the final `enable --now` named the masked go-librespot. Both fixed and pinned. Same run showed Debian enabling `bluealsa-aplay` (phone→box player) and PipeWire's *user-session* units; `_as_mask_idle_units` now masks bluealsa-aplay on both stacks and `--global` masks the session PipeWire/WirePlumber whenever the packages exist, so an ssh login never starts a second WirePlumber against BlueZ.
+
 Everything in steps 3–5 except 4d (warming) and the screen popup is in
 the tree and pinned. What is left, by who can answer it:
 
