@@ -592,6 +592,7 @@ SEEK_TAP_S = 15.0       # a TAP, every tap, on every content type
 # (held longer than s, step becomes s-of-content). Travel rates at the
 # 0.35s repeat: ~43/129/343/857 s per held second.
 SEEK_HOLD_LADDER = ((1.5, 45.0), (4.0, 120.0), (8.0, 300.0))
+SONOS_SCAN_WAIT_S = 4.0  # an SSDP round is ~3s: re-read the list once after it
 SEEK_POST_MIN_S = 0.7   # single-flight poster pacing: the bar compounds
 #                         per repeat, the NETWORK sees at most ~1.4/s
 SEEK_TAIL_S = 5.0       # mirror of the daemon's end clamp — without it
@@ -2570,12 +2571,30 @@ class App:
                 try:
                     self.sonos = api_get("/sonos?fresh=1", timeout=8)
                     self.dirty = True
+                    if self.sonos.get("scanning"):
+                        # nobody answered (the cabin): the sidecar is
+                        # running one SSDP round — read the list once more
+                        # when it is done, so the new rooms appear while
+                        # the menu is still open (owner 2026-09-05)
+                        time.sleep(SONOS_SCAN_WAIT_S)
+                        self.sonos = api_get("/sonos")
+                        self.dirty = True
                 except OSError:
                     pass  # cache stays on screen; Look again exists
             threading.Thread(target=freshen, daemon=True).start()
             self.push("output")
             self.dirty = True
         else:
+            # empty cache: today's two-way toggle, unchanged for the kid —
+            # and ONE scan behind it (the sidecar's fresh=1 falls through
+            # to SSDP when nobody can be asked), so a box that has Sonos
+            # shows the menu from the NEXT hold, never needing ssh
+            def scan():
+                try:
+                    api_get("/sonos?fresh=1", timeout=8)
+                except OSError:
+                    pass
+            threading.Thread(target=scan, daemon=True).start()
             self._toggle_output()
 
     def select_output(self):

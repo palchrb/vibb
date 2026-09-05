@@ -161,6 +161,34 @@ def rescan():
         return cache
 
 
+_bg_scan = threading.Lock()   # at most one SSDP round in flight
+
+
+def rescan_in_background():
+    """Nobody answered the topology call — an empty cache (fresh box) or a
+    new LAN (the cabin). One SSDP round OFF the request thread, so the
+    picker that asked stays instant; a second ask while it runs is a
+    no-op. Owner 2026-09-05: the list fills itself from the hold on X,
+    never from ssh. Returns True when a scan was started."""
+    if not _bg_scan.acquire(blocking=False):
+        return False
+
+    def run():
+        try:
+            c = rescan()
+            log(f"background scan: {len(c.get('players') or {})} speaker(s) cached")
+        except Exception as e:
+            log(f"background scan failed ({e.__class__.__name__})")
+        finally:
+            _bg_scan.release()
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+def scanning():
+    return _bg_scan.locked()
+
+
 def refresh_topology():
     """The whole household in ONE call: GetZoneGroupState against any
     cached speaker returns every zone (uid, name, ip) and every group
@@ -227,7 +255,7 @@ def players():
         return _load_cache()
 
 
-def players_payload(cache, stale=False):
+def players_payload(cache, stale=False, scanning=False):
     """The GET /players wire shape. uid + name only — speaker IPs are
     LAN topology and every GET is token-free by the box's SAFE rule.
     groups ride along so the picker can offer 'Stua + Kjøkken' as ONE
@@ -240,6 +268,8 @@ def players_payload(cache, stale=False):
                   if len(g.get("members") or []) > 1]}
     if stale:
         out["stale"] = True  # nobody answered — this is the old cache
+    if scanning:
+        out["scanning"] = True  # an SSDP round is running: ask again shortly
     return out
 
 
@@ -1055,13 +1085,15 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         cache = players()
                         stale = True
+                        rescan_in_background()   # empty cache / new LAN
                 else:
                     cache = players()
             except Exception as e:
                 self._send(502, {"error": "scan-failed",
                                  "detail": e.__class__.__name__})
                 return
-            self._send(200, players_payload(cache, stale=stale))
+            self._send(200, players_payload(cache, stale=stale,
+                                            scanning=scanning()))
         else:
             self._send(404, {"error": "not-found"})
 
