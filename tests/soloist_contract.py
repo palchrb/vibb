@@ -204,5 +204,30 @@ def selfcheck():
     return True
 
 
+
+
+def cover_check():
+    """7. album art: the largest cover, not cover[0] (owner 2026-09-05: the PWA
+    got thumbnails where go-librespot handed full-size art)."""
+    
+    import importlib.util as _ilu, sys as _sys, os as _os
+    _spec = _ilu.spec_from_file_location("soloistd", _os.path.join(REPO, "pi", "soloistd.py"))
+    _sd = _ilu.module_from_spec(_spec)
+    _sd.__spec__.loader.exec_module(_sd)
+    _ent = sample_entity("spotify:track:c", "N", ["A"], "L", 1000)
+    _ent["decorations"]["visual_identity"]["cover"] = [
+        {"url": "https://i/small.jpg", "size": "small", "width": 64},
+        {"url": "https://i/large.jpg", "size": "large", "width": 640},
+        {"url": "https://i/medium.jpg", "size": "medium", "width": 300}]
+    assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/large.jpg"
+    _ent["decorations"]["visual_identity"]["cover"] = [
+        {"url": "https://i/s.jpg", "size": "small"}, {"url": "https://i/l.jpg", "size": "large"}]
+    assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/l.jpg", "size label when no width"
+    _ent["decorations"]["visual_identity"]["cover"] = [{"url": "https://i/1.jpg"}, {"url": "https://i/2.jpg"}]
+    assert _sd.entity_to_track(_ent)["album_cover_url"] == "https://i/2.jpg", "last entry when nothing else"
+    print("7. album art: largest cover wins OK")
+    return True
+
+
 if __name__ == "__main__":
-    sys.exit(0 if selfcheck() else 1)
+    sys.exit(0 if (selfcheck() and cover_check()) else 1)

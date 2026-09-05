@@ -168,13 +168,37 @@ def _deco(ent):
     return (ent or {}).get("decorations") or {}
 
 
+_COVER_RANK = {"xlarge": 4, "large": 3, "medium": 2, "small": 1, "xsmall": 0}
+
+
+def _largest_cover(cover):
+    """Soloist's cover[] lists several sizes; cover[0] gave the PWA a thumbnail
+    where go-librespot's art was full size (owner 2026-09-05). Prefer the
+    entry with the largest pixel width, then the best 'size' label, then
+    the last entry (the list reads small -> large in the samples seen)."""
+    best, best_key = None, None
+    for i, c in enumerate(cover):
+        url = c.get("url")
+        if not url:
+            continue
+        w = c.get("width") or c.get("height") or 0
+        try:
+            w = int(w)
+        except (TypeError, ValueError):
+            w = 0
+        key = (w, _COVER_RANK.get(str(c.get("size") or "").lower(), -1), i)
+        if best_key is None or key > best_key:
+            best, best_key = url, key
+    return best
+
+
 def entity_to_track(ent, position_ms=0):
     """A Soloist Entity -> the dialect's track dict (contract TRACK_FIELDS)."""
     if not ent or not ent.get("uri"):
         return None
     d = _deco(ent)
-    cover = ((d.get("visual_identity") or {}).get("cover") or [{}])
-    cover_url = cover[0].get("url") if cover else None
+    cover = [c for c in ((d.get("visual_identity") or {}).get("cover") or []) if isinstance(c, dict)]
+    cover_url = _largest_cover(cover)
     parent = ((d.get("parent") or {}).get("entity") or {})
     return {"uri": ent["uri"],
             "name": (d.get("identity") or {}).get("name"),
