@@ -39,11 +39,12 @@
 #   SKIPPED there; AM-1/AM-2 are systemd facts, verify them on a flash.
 #
 # Knobs (env):
-#   WP_ROLES=a2dp_sink       bluez5.roles value. The plan guessed
-#                            a2dp_source (host-centric); the 1.4.2
-#                            source settles it the other way — see
-#                            AM-35 in pi/audio-stack.sh. S4 now only
-#                            CONFIRMS it on real hardware.
+#   WP_ROLES=a2dp_source     bluez5.roles value. Registration is
+#                            LOCAL-centric (endpoint_should_be_registered
+#                            gates on the SOURCE direction = a2dp_source);
+#                            AM-35's a2dp_sink registered only the
+#                            phone->box endpoint (first Zero 2026-09-05,
+#                            AM-57 in pi/audio-stack.sh).
 #   WP_PROFILE=main-embedded WirePlumber 0.5.8 SHIPS it: main +
 #                            mixin.systemwide-session (no logind/seat/
 #                            reserve-device/portal) + mixin.stateless
@@ -65,7 +66,7 @@ PW_USER=pipewire
 RUN=/run/pipewire
 SOCK="$RUN/pipewire-0"
 STATE=/var/lib/vibb
-WP_ROLES="${WP_ROLES:-a2dp_sink}"
+WP_ROLES="${WP_ROLES:-a2dp_source}"
 WP_DISABLE_HOOKS="${WP_DISABLE_HOOKS:-1}"   # bench 2026-09-03: REQUIRED (targetless linked to default without it) and safe
 WP_PROFILE="${WP_PROFILE:-main-embedded}"
 BT_MAC="${BT_MAC:-}"

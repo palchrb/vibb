@@ -40,16 +40,16 @@ print("1. suspend 120 on bluez nodes only, 5 on the HAT OK")
 
 for line in ("bluez5.codecs             = [ sbc ]", "bluez5.enable-sbc-xq      = false",
              "bluez5.enable-msbc        = false", "bluez5.dummy-avrcp-player = false",
-             "bluez5.roles              = [ a2dp_sink ]",
+             "bluez5.roles              = [ a2dp_source ]",
              "bluez5.autoswitch-profile = false", "bluetooth.autoswitch-to-headset-profile = false"):
     assert line in frag, line
 assert not re.search(r"^\s*bluez5\.(enable-)?hw-volume\s*=", frag, re.M), \
     "AM-35: hw-volume is a quirk-list override — setting it either way is wrong"
-print("2. sbc only, no XQ/mSBC, hw-volume left at its default, remote-sink role, "
+print("2. sbc only, no XQ/mSBC, hw-volume left at its default, local source role (AM-57), "
       "no dummy player OK")
 
-flipped = render(WP_ROLES="a2dp_source")
-assert "bluez5.roles              = [ a2dp_source ]" in flipped
+flipped = render(WP_ROLES="a2dp_sink")
+assert "bluez5.roles              = [ a2dp_sink ]" in flipped
 print("3. WP_ROLES flips in one place OK")
 
 assert "main-embedded = {" in frag

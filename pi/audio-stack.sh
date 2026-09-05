@@ -31,17 +31,18 @@ _AS_STATE="$_AS_ROOT/var/lib/vibb"
 _AS_STACK_FILE="$_AS_ETC/vibb/audio-stack"
 _AS_SOCK=/run/pipewire/pipewire-0
 PW_USER=pipewire
-# bluez5.roles names the REMOTE device's role — settled from the PipeWire
-# 1.4.2 source, not guessed (AM-35): bluez5-device.c emit_nodes() answers
-# SPA_BT_PROFILE_A2DP_SINK with emit_node(DEVICE_ID_SINK, ...), i.e. a
-# PLAYBACK node (bluez_output.*), and bluez5-dbus.c's
-# media_endpoint_to_profile() maps our locally registered
-# A2DP_SOURCE_ENDPOINT (UUID 0000110a) to that same profile — the very
-# UUID btbus's transport gate matches. So a2dp_sink = "the headphone is
-# the sink, we feed it". Listing ONLY it also means the box never
-# registers the 0000110b sink endpoint, so a phone cannot stream INTO
-# the box (MODERATE-3 closed by construction, not by policy).
-WP_ROLES="${WP_ROLES:-a2dp_sink}"
+# bluez5.roles is LOCAL-centric for endpoint registration (AM-57, first
+# Zero 2026-09-05, PipeWire 1.4.2 bluez5-dbus.c): endpoint_should_be_registered()
+# gates on get_codec_profile(codec, direction) & enabled_profiles, and for
+# direction SOURCE (we send audio to the headphone) that is
+# SPA_BT_PROFILE_A2DP_SOURCE = role name "a2dp_source". AM-35 read
+# media_endpoint_to_profile() instead, which names the TRANSPORT after the
+# remote role — a different function. With [ a2dp_sink ] the box registered
+# only the phone->box endpoint and bluetoothd answered every headset connect
+# with "a2dp-sink profile connect failed: Protocol not available". Listing
+# ONLY a2dp_source still means no 0000110b sink endpoint: a phone cannot
+# stream INTO the box (MODERATE-3 holds, under the right name).
+WP_ROLES="${WP_ROLES:-a2dp_source}"
 WP_PROFILE="${WP_PROFILE:-main-embedded}"
 
 _as_say() { echo "    audio stack: $*"; }
@@ -166,6 +167,7 @@ WantedBy=pipewire.service
 EOF
 }
 
+_AS_FRAG_CHANGED=0
 _as_write_fragments() {
   # /run/pipewire: the socket unit creates it (DirectoryMode) owned by ROOT,
   # and pipewire (User=$PW_USER) then cannot create pipewire-0.lock in it —
@@ -208,7 +210,7 @@ stream.properties = {
   node.autoconnect    = true
 }
 EOF
-  write_if_changed "$_AS_ETC/wireplumber/wireplumber.conf.d/50-vibb.conf" <<EOF || true
+  write_if_changed "$_AS_ETC/wireplumber/wireplumber.conf.d/50-vibb.conf" <<EOF && _AS_FRAG_CHANGED=1
 # vibb extends the shipped '$WP_PROFILE' profile (0.5.8: main +
 # systemwide-session + stateless — no logind, no seat monitoring, no
 # reserve-device, no portal, every *.state restore hook off). Only names
@@ -325,6 +327,11 @@ audio_stack_apply() {
       sleep 3
       systemctl is-active --quiet pipewire.service \
         && systemctl is-active --quiet wireplumber.service || _ok=0
+    fi
+    # a changed WirePlumber fragment (roles, codecs, rules) is read at start
+    # only: an already-running wireplumber keeps the old one until restarted
+    if [[ $_ok -eq 1 && $_AS_FRAG_CHANGED -eq 1 ]]; then
+      systemctl try-restart wireplumber.service >/dev/null 2>&1 || true
     fi
     if [[ $_ok -ne 1 ]]; then
       systemctl disable --now pipewire.socket pipewire.service wireplumber.service >/dev/null 2>&1 || true
