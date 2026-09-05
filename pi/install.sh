@@ -1390,6 +1390,18 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
+# Under soloist there is no Connect login to wait for: go-librespot is masked,
+# and the key + pairing happen in the PWA (soloistd: needs-key -> needs-pair -> ok).
+if [[ $SPOTIFY_ENGINE == soloist ]]; then
+  echo "==> [8/8] Spotify (Soloist): the login happens in the PWA"
+  echo
+  echo "    Fresh box: fetch the build first —  sudo systemctl start vibb-soloist-update.service"
+  echo "    Then in the PWA's Spotify card: paste the Soloist API key, tap Pair,"
+  echo "    and pick \"$DEVICE_NAME\" under Devices in the Spotify app."
+  print_token
+  exit 0
+fi
+
 if grep -q '"username"' "$CONF_DIR/state.json" 2>/dev/null; then
   echo "==> [8/8] Already logged in to Spotify — done!"
   print_token

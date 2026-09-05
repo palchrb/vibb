@@ -111,3 +111,11 @@ print("6. BA_UNIT defined under pipewire; enable + restart via the engine seam O
 assert "swig liblgpio-dev" in src[:i_loop], "swig + liblgpio-dev in PKGS, before the apt loop"
 assert "apt-get install -y -qq swig liblgpio-dev" not in src, "no hidden apt call for the lgpio build"
 print("7. swig + liblgpio-dev through the visible package loop OK")
+
+# 8 (field 2026-09-05): step 8 waited five minutes for a go-librespot Connect
+# login that can never come under --soloist (the unit is masked). The soloist
+# branch prints the PWA route + token and exits before that wait.
+i_sol = src.index('if [[ $SPOTIFY_ENGINE == soloist ]]; then\n  echo "==> [8/8] Spotify (Soloist)')
+assert i_sol < src.index('echo "==> [8/8] Spotify login"'), "soloist branch before the Connect wait"
+assert "print_token" in src[i_sol:i_sol + 700], "the token still printed under soloist"
+print("8. step 8 under soloist: PWA route + token, no Connect wait OK")
