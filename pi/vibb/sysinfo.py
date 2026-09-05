@@ -354,6 +354,15 @@ def _battery_runtime_tracker():
             log(f"battery runtime tracker error: {e!r}")
 
 
+def spotify_cache_dir():
+    """Where the Spotify engine keeps its audio cache: go-librespot's dir, or
+    soloistd's CacheDirectory under soloist (owner 2026-09-06: the PWA showed
+    no Spotify cache size at all on the soloist box)."""
+    if os.environ.get("VIBB_GO_UNIT", "go-librespot") == "vibb-soloistd":
+        return os.environ.get("VIBB_SOLOIST_CACHE_DIR", "/var/cache/vibb-soloist")
+    return "/var/lib/vibb/spotify-cache"
+
+
 def _dir_size(path):
     total = 0
     for root, _dirs, files in os.walk(path):
@@ -404,7 +413,7 @@ def system_status():
         pass
     caches = {}
     for name, p in (("podcasts", CACHE_DIR),
-                    ("spotify", "/var/lib/vibb/spotify-cache")):
+                    ("spotify", spotify_cache_dir())):
         if os.path.isdir(p):
             caches[name] = _dir_size_cached(p)
     temp = None
