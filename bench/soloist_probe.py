@@ -28,6 +28,16 @@ from the ws.addr/ws.port files Soloist writes next to its state. Prints:
           Answers AM-79 (a) prefetch of the next track, (b) does Soloist keep
           fetching into vibb_null, (c) the bitrate actually received.
 
+  --queue-test <context uri> [--at N] [--seek MS] [--queue-n K] [--mute]
+          The "start on the right song without a walk" experiment (owner,
+          2026-09-06): play the context once to learn its rows, pause, then
+          `play <track uri of row N>` (timed), `seek MS`, K× `add_to_queue`
+          for the rows after it (timed, does queue_changed follow?), read the
+          queue (sources), skip_next / skip_prev (where does prev land?),
+          skip to the end of the queue and one past it (autoplay? idle?).
+          Prints one RESULT line per question. Changes what the box plays —
+          bench only, and --mute against a live sink.
+
 Owner 2026-09-05: "kan vi ikke teste å spørre soloist direkte?"
 """
 import base64
@@ -270,6 +280,137 @@ def play_and_watch(ws, uri, seconds, mute):
         print("        two or more new files: a second fetch ran alongside (prefetch of the next track?)")
 
 
+def _state(ws):
+    ws.send_json({"type": "command", "command": "get_state"})
+    st, _ = wait(ws, "playback_state", 5)
+    st = st or {}
+    item = st.get("item") or {}
+    return {"status": st.get("status"), "uri": item.get("uri"), "name": name_of({"item": item}),
+            "position_ms": (st.get("position") or {}).get("position_ms"),
+            "context": (st.get("context") or {}).get("uri"), "raw": st}
+
+
+def _queue(ws):
+    ws.send_json({"type": "command", "command": "get_queue", "limit": 0})
+    q, _ = wait(ws, "queue_changed", 10)
+    q = q or {}
+    return q.get("previous") or [], q.get("upcoming") or []
+
+
+def _row(e):
+    return f"{name_of(e)}[{(e or {}).get('source')}]"
+
+
+def queue_test(ws, ctx_uri, at, seek_ms, k, mute):
+    vol = None
+    if mute:
+        vol = _state(ws)["raw"].get("volume")
+        ws.send_json({"type": "command", "command": "set_volume", "volume": 0})
+        wait(ws, "volume_changed", 3)
+    try:
+        # 1. the rows of the context, from one context play
+        t0 = time.monotonic()
+        ws.send_json({"type": "command", "command": "play", "uri": ctx_uri})
+        tc, seen = wait(ws, "track_changed", 15)
+        print(f"1. play context -> track_changed after {time.monotonic() - t0:.2f}s (events: {seen})")
+        if not tc:
+            print("   no track_changed: cannot learn the rows — stop"); return
+        cur = (tc.get("item") or {}).get("uri")
+        time.sleep(1.0)
+        prev, upc = _queue(ws)
+        rows = [((e.get("item") or {}).get("uri"), name_of(e)) for e in reversed(prev) if e.get("source") == "context"]
+        rows.append((cur, name_of({"item": tc.get("item")})))
+        rows += [((e.get("item") or {}).get("uri"), name_of(e)) for e in upc if e.get("source") == "context"]
+        print(f"   rows visible: {len(rows)} (previous={len(prev)} upcoming={len(upc)})")
+        for i, (u, n) in enumerate(rows[:at + k + 2]):
+            print(f"     {i:2d} {n!r} {u}")
+        if len(rows) < at + 2:
+            print(f"   fewer than {at + 2} rows visible — use a smaller --at"); return
+        ws.send_json({"type": "command", "command": "pause"})
+        wait(ws, "playback_changed", 3)
+        target = rows[at]
+        followers = rows[at + 1:at + 1 + k]
+
+        # 2. play the TRACK: how fast, and what is the context afterwards?
+        t0 = time.monotonic()
+        ws.send_json({"type": "command", "command": "play", "uri": target[0]})
+        tc, seen = wait(ws, "track_changed", 15)
+        dt = time.monotonic() - t0
+        st = _state(ws)
+        print(f"2. play track {target[1]!r} -> track_changed after {dt:.2f}s (events: {seen})")
+        print(f"   RESULT a: status={st['status']} now={st['name']!r} context={st['context']!r} "
+              f"({'the track, no context' if not st['context'] else 'a context is set'})")
+        prev, upc = _queue(ws)
+        print(f"   RESULT b: queue right after a track play: previous={len(prev)} upcoming={len(upc)} "
+              f"upcoming={[_row(e) for e in upc[:6]]}")
+
+        # 3. seek
+        t0 = time.monotonic()
+        ws.send_json({"type": "command", "command": "seek", "position_ms": seek_ms})
+        m, seen = wait(ws, "position_sync", 3)
+        time.sleep(0.5)
+        st = _state(ws)
+        print(f"3. seek {seek_ms} -> events {seen} in {time.monotonic() - t0:.2f}s; position_ms now {st['position_ms']} "
+              f"status={st['status']}")
+        print(f"   RESULT c: {'seek landed' if st['position_ms'] and abs(st['position_ms'] - seek_ms) < 5000 else 'seek NOT reflected'}")
+
+        # 4. add_to_queue the followers
+        times = []
+        pushed = []
+        for u, n in followers:
+            t0 = time.monotonic()
+            ws.send_json({"type": "command", "command": "add_to_queue", "uri": u})
+            m, seen = wait(ws, "queue_changed", 2)      # does Soloist push the queue on an add?
+            times.append(time.monotonic() - t0)
+            pushed.append(bool(m))
+            print(f"   add_to_queue {n!r}: {times[-1]:.2f}s, events {seen}")
+        prev, upc = _queue(ws)
+        print(f"4. RESULT d: {len(followers)} add_to_queue in {sum(times):.2f}s total "
+              f"(queue_changed pushed for {sum(pushed)}/{len(pushed)}); queue now previous={len(prev)} "
+              f"upcoming={[_row(e) for e in upc[:8]]}")
+
+        # 5. skip_next, then skip_prev: where does prev land?
+        ws.send_json({"type": "command", "command": "play"})
+        wait(ws, "playback_changed", 3)
+        ws.send_json({"type": "command", "command": "skip_next"})
+        tc, seen = wait(ws, "track_changed", 10)
+        st1 = _state(ws)
+        print(f"5. skip_next -> {st1['name']!r} (events {seen})")
+        ws.send_json({"type": "command", "command": "skip_prev"})
+        tc, seen = wait(ws, "track_changed", 10)
+        st2 = _state(ws)
+        print(f"   skip_prev -> {st2['name']!r} position_ms={st2['position_ms']} (events {seen})")
+        back = "back to the played track" if st2["uri"] == target[0] else ("restarted the same queue item" if st2["uri"] == st1["uri"] else f"landed on {st2['name']!r}")
+        print(f"   RESULT e: skip_prev from the first queued item: {back}")
+        prev, upc = _queue(ws)
+        print(f"   queue after prev: previous={[_row(e) for e in prev[:4]]} upcoming={[_row(e) for e in upc[:6]]}")
+
+        # 6. to the end of the queue and one past it
+        landed = []
+        for _ in range(len(followers) + 2):
+            ws.send_json({"type": "command", "command": "skip_next"})
+            tc, seen = wait(ws, "track_changed", 10)
+            st = _state(ws)
+            landed.append((st["name"], st["status"], st["context"]))
+            prev, upc = _queue(ws)
+            print(f"   skip_next -> {st['name']!r} status={st['status']} context={st['context']!r} "
+                  f"next={[_row(e) for e in upc[:2]]}")
+            if not tc:
+                break
+        st = _state(ws)
+        prev, upc = _queue(ws)
+        tail = upc[0].get("source") if upc else None
+        print(f"6. RESULT f: past the end of the queue: status={st['status']} now={st['name']!r} "
+              f"context={st['context']!r} next source={tail!r} "
+              f"({'AUTOPLAY/radio follows' if tail == 'autoplay' else 'nothing follows' if not upc else tail})")
+        ws.send_json({"type": "command", "command": "pause"})
+        wait(ws, "playback_changed", 3)
+    finally:
+        if mute and vol is not None:
+            ws.send_json({"type": "command", "command": "set_volume", "volume": int(vol)})
+            wait(ws, "volume_changed", 3)
+
+
 def main():
     raw = "--raw" in sys.argv[1:]
     args = sys.argv[1:]
@@ -287,6 +428,13 @@ def main():
     print("connected (Soloist accepts a second client)")
     if play_uri:
         play_and_watch(ws, play_uri, watch_s, mute)
+        return
+    if "--queue-test" in args:
+        ctx = args[args.index("--queue-test") + 1]
+        at = int(args[args.index("--at") + 1]) if "--at" in args else 3
+        seek_ms = int(args[args.index("--seek") + 1]) if "--seek" in args else 45000
+        k = int(args[args.index("--queue-n") + 1]) if "--queue-n" in args else 5
+        queue_test(ws, ctx, at, seek_ms, k, mute)
         return
 
     ws.send_json({"type": "command", "command": "get_state"})
