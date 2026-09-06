@@ -185,6 +185,60 @@ FAKE.tail_b = 0
 p.terminate(); p.wait(5)
 print("W10. a fetched track's late tail never stalls the cached one after it OK")
 
+# ---- W11: the queue window is shorter than the list (the Zero: 10 upcoming) --------
+# the remembered order at a start is one window; the walk must re-query at
+# its end and go on to the context's real end; a later fresh start (the kid
+# plays it) must not shrink the remembered list back to one window
+fresh_fake("fast")
+install_pw_dump("follow", null=True)
+FAKE.window = 3
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+post(base, "/cache/download", {"uri": CTX})
+h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"], 90, "windowed pass")
+logtxt = open(p.logpath).read()
+assert h["warm_last"]["result"] == "done", (h["warm_last"], logtxt[-1500:])
+assert "remembered 4 rows" in logtxt and "list grew to" in logtxt, logtxt[-1500:]
+ledger = json.load(open(os.path.join(data, "vibb", "ledger.json")))
+assert sorted(ledger[CTX]["warmed"]) == sorted(TRACKS) and ledger[CTX]["complete"] is True, ledger[CTX]
+code, lst = get(base, "/context/tracks?uri=" + CTX)
+assert [x["uri"] for x in lst["tracks"]] == TRACKS, lst          # the whole list, from disk
+code, r = post(base, "/cache/download", {"uri": CTX})
+assert code == 200 and r["done"] is True and r["warmed"] == len(TRACKS), (code, r)
+# the kid plays it: a fresh start through the 3-window keeps the 6-row order
+wait_state(base, "ok")
+code, r = post(base, "/player/play", {"uri": CTX})
+assert code == 200 and r["ok"], (code, r)
+time.sleep(0.5)
+code, lst = get(base, "/context/tracks?uri=" + CTX)
+assert [x["uri"] for x in lst["tracks"]] == TRACKS and not lst.get("stale"), lst
+p.terminate(); p.wait(5)
+print("W11. a 3-row window: the walk grows the order to the real end, a fresh start keeps it OK")
+
+# ---- W12: a ledger row from before AM-85 (no version) owes ONE verify walk ----------
+# same data + cache dirs; the row says done+complete but was judged from one
+# window: the ask must run a pass (202), the walk finds nothing new, and the
+# next ask is an instant done again
+lp = os.path.join(data, "vibb", "ledger.json")
+led = json.load(open(lp)); led[CTX].pop("v", None); json.dump(led, open(lp, "w"))
+cache_dir = FAKE.cache_dir
+p, base, _ = start_sidecar(data=data, cache=cache_dir)
+FAKE.cached_uris = set(TRACKS)
+wait_state(base, "ok")
+code, r = post(base, "/cache/download", {"uri": CTX})
+assert code == 202, (code, r)
+h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"], 90, "verify walk")
+assert h["warm_last"]["result"] == "done", (h["warm_last"], open(p.logpath).read()[-1500:])
+assert "one verify walk owed" in open(p.logpath).read()
+assert not FAKE.fetch_log, FAKE.fetch_log
+led = json.load(open(lp))
+assert led[CTX]["v"] == 2 and led[CTX]["complete"] is True and sorted(led[CTX]["warmed"]) == sorted(TRACKS), led[CTX]
+code, r = post(base, "/cache/download", {"uri": CTX})
+assert code == 200 and r["done"] is True, (code, r)
+FAKE.window = None
+p.terminate(); p.wait(5)
+print("W12. a pre-AM-85 ledger row: one verify walk, then instant done again OK")
+
 # ---- W6: a stalled link ------------------------------------------------------------
 fresh_fake("stall")
 install_pw_dump("follow", null=True)

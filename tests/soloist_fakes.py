@@ -56,6 +56,7 @@ class FakeSoloist:
         # 4d: the audio cache the sidecar watches
         self.cache_dir = None            # set by start_sidecar (CACHE_DIRECTORY)
         self.fetch_mode = "fast"         # fast | slow | stall | none
+        self.window = None               # upcoming rows per get_queue (the Zero: 10; None = all)
         self.tail_b = 0                  # the Zero: a ~17 KB tail lands ~3 s after the whole file
         self.tail_delay_s = 1.0          # ... whatever the player does meanwhile (skip included)
         self.cached_uris = set()         # already in the cache: nothing is written
@@ -242,6 +243,8 @@ class FakeSoloist:
         upc.append({"uid": "ux", "source": "autoplay", "item": C.sample_entity("spotify:track:radio", "R", ["X"], "Y", 1000)})
         if limit:                # get_queue limit=N: that many upcoming (0/None = all)
             upc = upc[:int(limit)]
+        elif self.window:        # the Zero (2026-09-06): a start shows 10 upcoming, no more
+            upc = upc[:self.window]
         self.send({"type": "queue_changed", "previous": prev, "upcoming": upc})
 
 
@@ -279,7 +282,7 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
-def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node"):
+def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node", cache=None):
     data = data or tempfile.mkdtemp()
     try:                                   # a "follow" graph tracks THIS sidecar's children
         doc = json.load(open(PWD_FILE))
@@ -292,7 +295,7 @@ def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node"):
     with open(os.path.join(state, "output.json"), "w") as f:
         json.dump({"output": "local", "pcm": pcm}, f)
     port = free_port()
-    cache = tempfile.mkdtemp()
+    cache = cache or tempfile.mkdtemp()
     FAKE.cache_dir = cache
     FAKE.cached_uris = set()
     FAKE.fetch_log = []

@@ -101,6 +101,7 @@ WARM_PASS_MAX_ITEMS = int(os.environ.get("VIBB_WARM_PASS_MAX_ITEMS", "100"))
 WARM_VERIFY_S = 24 * 3600              # a done context is re-verified at most this often
 WARM_LEDGER_TTL_S = 30 * 24 * 3600     # Soloist's own eviction is invisible: re-walk after this
 WARM_MAX_STALLS = 3
+LEDGER_V = 2                           # AM-85: v1 rows called a one-window order 'complete'
 PREFETCH_BLOCK_B = 131168              # one 128 KiB block + 96 B header: the next item's prefetch
 TAIL_MAX_B = 64 * 1024                 # growth below this on an OLD file is a late tail, not a fetch (AM-81: 17 KB)
 
@@ -879,6 +880,18 @@ class Engine:
                 f"(cache/size/build changed or {WARM_LEDGER_TTL_S // 86400} days old)")
             e["warmed"] = []
             e["verified_at"] = None
+        if e.get("v") != LEDGER_V:
+            # a row written by an older sidecar: its 'complete' cannot be
+            # trusted (v1 judged it from one window) — the warmed rows stand,
+            # one verify walk to the context's real end is owed
+            if e.get("warmed"):
+                log(f"ledger: {uri}: v{e.get('v') or 1} -> v{LEDGER_V}: one verify walk owed")
+            e["complete"] = False
+            e["verified_at"] = None
+            e["v"] = LEDGER_V
+            rec = self.orders.get(uri)
+            if rec:
+                rec["complete"] = False
         e.update(stamp)
         e.setdefault("warmed", [])
         e.setdefault("unavailable", [])
@@ -1166,11 +1179,9 @@ class Engine:
         rec = self.orders.get(uri) or {}
         order = list(rec.get("tracks") or [])
         if rows is not None:
-            # 'complete' when the window held everything: previous was empty
-            # at a fresh start, so upcoming < the 80-window means the end is in sight
-            complete = len(rows) < 80
-            rec["complete"] = complete
-            e["complete"] = complete
+            # 'complete' is decided at the walk's END (AM-85): the window at a
+            # start is 10 upcoming on the Zero (80 on the bench) — the length
+            # of one window says nothing about the length of the list
             fp = _fingerprint(order)
             if e.get("fingerprint") and e["fingerprint"] != fp:
                 gone = [u for u in e["warmed"] if u not in order]
@@ -1189,6 +1200,10 @@ class Engine:
             raise WarmAborted("mis-bound")
         targets = [u for u in order if u not in e["warmed"] and u not in e["unavailable"]]
         self.warm["n"] = len(targets)
+        if not targets and not rec.get("complete"):
+            # everything remembered is warm but the order was never proven
+            # complete (AM-85): walk on to find the end
+            targets = order[-1:] if order else []
         if not targets:
             e["verified_at"] = time.time()
             self._step(self.cmd, "pause")
@@ -1227,6 +1242,16 @@ class Engine:
                     return "stalled"
             targets = [u for u in targets if u != cur]
             self._ledger_save()
+            if not targets:
+                # the remembered order is used up — the CONTEXT may go on
+                # (AM-85: the Zero's window is 10 upcoming): one more
+                # get_queue from here appends what lies beyond, the walk
+                # continues; nothing new = the end is in sight
+                self._snapshot_listing(uri)
+                order = list((self.orders.get(uri) or {}).get("tracks") or order)
+                targets = [u for u in order if u not in e["warmed"] and u not in e["unavailable"]]
+                if targets:
+                    log(f"warm: {uri}: list grew to {len(order)} rows")
             if self._queue_ends():
                 break
             since = self.mark()
@@ -1238,6 +1263,13 @@ class Engine:
         self._step(self.cmd, "pause")
         left = [u for u in order if u not in e["warmed"] and u not in e["unavailable"]]
         if not left:
+            # the walk reached the context's end with every row warmed: the
+            # remembered order IS the list
+            e["complete"] = True
+            rec = self.orders.get(uri)
+            if rec:
+                rec["complete"] = True
+                _save_json(_order_path(uri), rec)
             e["verified_at"] = time.time()
             return "done"
         return "budget" if items >= WARM_PASS_MAX_ITEMS else "partial"
@@ -1360,8 +1392,14 @@ class Engine:
         for t in tracks:
             self.meta[t["uri"]] = t["track"]
         rec = self.orders.get(uri)
-        if fresh_start or not rec:
-            rec = {"uri": uri, "tracks": [t["uri"] for t in tracks],
+        seen = [t["uri"] for t in tracks]
+        known = list((rec or {}).get("tracks") or [])
+        if fresh_start and rec and len(known) > len(seen) and known[:len(seen)] == seen:
+            # the same list from its start, seen through a window shorter
+            # than what a walk already found (AM-85): keep the longer order
+            rec["remembered_at"] = time.time()
+        elif fresh_start or not rec:
+            rec = {"uri": uri, "tracks": seen,
                    "remembered_at": time.time(), "complete": bool(complete)}
         else:
             known = set(rec["tracks"])
