@@ -90,7 +90,9 @@ spotify_engine_unit() {
 }
 
 _se_write_soloistd_unit() {
-  write_if_changed "$_SE_ETC/systemd/system/vibb-soloistd.service" <<EOF || true
+  # status = write_if_changed's: 0 when the unit text changed (the caller
+  # restarts the sidecar — new limits/env apply only to a fresh service)
+  write_if_changed "$_SE_ETC/systemd/system/vibb-soloistd.service" <<EOF
 [Unit]
 Description=Vibb Spotify engine: soloistd (Spotify Soloist behind the go-librespot dialect)
 # The sidecar supervises the soloist child itself (exit 10 = build expired
@@ -103,6 +105,13 @@ StartLimitBurst=6
 
 [Service]
 User=$RUN_USER
+# PipeWire's module-rt in every client this unit spawns (the soloist child,
+# every pw-dump) wants SCHED_FIFO 88 and nice -11; with these limits it sets
+# them itself and never asks RTKit over a session bus this user has none of
+# — the journal's "mod.rt: Failed to connect to session bus … \$DISPLAY"
+# line per pw-dump (AM-86). The audio thread gets the priority it asked for.
+LimitRTPRIO=95
+LimitNICE=-11
 # the API key (KEY=VALUE), written 0600 by the PWA — '-' so a box without
 # one still starts, into the sidecar's clear needs-key state
 EnvironmentFile=-$_SE_ENV
@@ -166,7 +175,7 @@ spotify_engine_apply() {
     # a running unit alone, and the first Zero (2026-09-05 23:00) ran the
     # old sidecar for an hour after install — /cache/download answered 404
     install_if_changed 755 "$SCRIPT_DIR/soloistd.py" "$_SE_ROOT/usr/local/bin/vibb-soloistd" && _se_changed=1
-    _se_write_soloistd_unit
+    _se_write_soloistd_unit && _se_changed=1      # a changed unit (AM-86's limits) needs a restart too
     _se_write_update_units
     systemctl daemon-reload
     # two Connect devices for one box is the plan's rejected coexistence:

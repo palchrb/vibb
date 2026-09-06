@@ -29,6 +29,7 @@ def run(engine, stack, sidecar=True, apply=True, fail_enable=False, root=None):
     root = root or tempfile.mkdtemp()
     bindir = os.path.join(root, "bin"); os.makedirs(bindir, exist_ok=True)
     log = os.path.join(root, "systemctl.log")
+    open(log, "w").close()                      # a reused tree starts with an empty call log
     with open(os.path.join(bindir, "systemctl"), "w") as f:
         f.write(f'#!/bin/sh\necho "systemctl $@" >> {log}\n'
                 f'[ "${{FAKE_ENABLE_FAILS:-0}}" = 1 ] && [ "$1" = enable ] && exit 1\nexit 0\n')
@@ -43,8 +44,8 @@ def run(engine, stack, sidecar=True, apply=True, fail_enable=False, root=None):
         open(os.path.join(root, "etc/vibb/audio-stack"), "w").write(stack + "\n")
     script = f"""
 set -e
-write_if_changed() {{ mkdir -p "$(dirname "$1")"; cat > "$1"; }}
-install_if_changed() {{ echo "install $2 -> $3" >> {log}; mkdir -p "$(dirname "$3")"; cp "$2" "$3"; }}
+write_if_changed() {{ local t; t="$(mktemp)"; cat > "$t"; if cmp -s "$t" "$1" 2>/dev/null; then rm -f "$t"; return 1; fi; mkdir -p "$(dirname "$1")"; mv "$t" "$1"; }}
+install_if_changed() {{ if cmp -s "$2" "$3" 2>/dev/null; then return 1; fi; echo "install $2 -> $3" >> {log}; mkdir -p "$(dirname "$3")"; cp "$2" "$3"; }}
 RUN_USER=kid; SCRIPT_DIR={sd}
 . {sd}/audio-stack.sh
 . {sd}/spotify-engine.sh
@@ -92,6 +93,7 @@ unit = open(os.path.join(root, "etc/systemd/system/vibb-soloistd.service")).read
 for line in ("User=kid", "EnvironmentFile=-/etc/vibb/soloist.env", "StateDirectory=vibb-soloist",
              "Environment=VIBB_RUN=/run",   # AM-69: the poweroff-imminent marker is root's /run
              "CacheDirectory=vibb-soloist", "Restart=on-failure",
+             "LimitRTPRIO=95", "LimitNICE=-11",   # AM-86: module-rt sets its own priority, never RTKit
              'Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"',
              "Environment=VIBB_AUDIO_STACK=pipewire", "After=network-online.target wireplumber.service"):
     assert line in unit, line
@@ -116,6 +118,23 @@ assert not re.search(r"^(OnCalendar|Persistent)=", timer, re.M), \
 assert "systemctl enable --now vibb-soloist-update.timer" in calls
 print("3. soloist: sidecar installed, unit shaped, go-librespot disabled, env, no GO_CONFIG OK")
 print("3b. updater unit + MONOTONIC timer written and enabled OK")
+
+# 3b. a second apply on the same tree changes nothing: no restart. A changed
+#     unit text alone (the device name lands in Environment=) restarts the
+#     sidecar even though the sidecar file is unchanged — AM-86's limits
+#     reach the running service that way
+r2, calls2, _, _ = run("soloist", "pipewire", root=root)
+assert r2.returncode == 0, r2.stderr
+assert "systemctl try-restart vibb-soloistd.service" not in calls2, calls2
+os.environ["DEVICE_NAME"] = "Vibb (other)"
+try:
+    r3, calls3, _, _ = run("soloist", "pipewire", root=root)
+finally:
+    del os.environ["DEVICE_NAME"]
+assert r3.returncode == 0, r3.stderr
+assert "systemctl try-restart vibb-soloistd.service" in calls3, calls3
+assert not any(c.startswith("install ") for c in calls3), calls3     # the sidecar file itself was unchanged
+print("3c. unchanged tree: no restart; a changed unit text alone: restart OK")
 
 # 4. rollback keeps config.yml byte-identical
 cfg = os.path.join(root, "config.yml"); open(cfg, "w").write("audio_backend: alsa\naudio_device: vibb_bt\n")
