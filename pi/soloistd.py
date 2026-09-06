@@ -1398,21 +1398,25 @@ class Engine:
             # the same list from its start, seen through a window shorter
             # than what a walk already found (AM-85): keep the longer order
             rec["remembered_at"] = time.time()
+            new = 0
         elif fresh_start or not rec:
             rec = {"uri": uri, "tracks": seen,
                    "remembered_at": time.time(), "complete": bool(complete)}
+            new = len(seen)
         else:
-            known = set(rec["tracks"])
-            rec["tracks"] = rec["tracks"] + [t["uri"] for t in tracks if t["uri"] not in known]
+            add = [u for u in seen if u not in set(known)]
+            rec["tracks"] = known + add
             rec["remembered_at"] = time.time()
             if complete is not None:
                 rec["complete"] = bool(complete)
+            new = len(add)
         self.orders[uri] = rec
         try:
             _save_json(_order_path(uri), rec)
             _save_json(os.path.join(STORE_DIR, "meta.json"), self.meta)
         except OSError as e:
             log(f"store: {e!r}")
+        return new
 
     def _remembered(self, uri):
         """The remembered list for uri as dialect rows, or []."""
@@ -1430,8 +1434,9 @@ class Engine:
         except OSError:
             return None
         if tracks is not None:
-            self._remember(uri, tracks, fresh, complete)
-            log(f"listing: remembered {len(tracks)} rows for {uri} at start")
+            new = self._remember(uri, tracks, fresh, complete)
+            log(f"listing: {'start' if fresh else 'window'} of {len(tracks)} rows for {uri}"
+                f" ({new} new)")
         return tracks
 
     def listing(self, uri):

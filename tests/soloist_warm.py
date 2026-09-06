@@ -198,7 +198,8 @@ post(base, "/cache/download", {"uri": CTX})
 h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"], 90, "windowed pass")
 logtxt = open(p.logpath).read()
 assert h["warm_last"]["result"] == "done", (h["warm_last"], logtxt[-1500:])
-assert "remembered 4 rows" in logtxt and "list grew to" in logtxt, logtxt[-1500:]
+assert "start of 4 rows" in logtxt and "list grew to" in logtxt, logtxt[-1500:]
+assert "window of" in logtxt and "(2 new)" in logtxt, logtxt[-1500:]      # the re-query, honestly named
 ledger = json.load(open(os.path.join(data, "vibb", "ledger.json")))
 assert sorted(ledger[CTX]["warmed"]) == sorted(TRACKS) and ledger[CTX]["complete"] is True, ledger[CTX]
 code, lst = get(base, "/context/tracks?uri=" + CTX)
