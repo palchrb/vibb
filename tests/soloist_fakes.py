@@ -261,7 +261,8 @@ n = len([x for x in os.listdir(d) if x.startswith("argv-")]) + 1
 open(os.path.join(d, f"argv-{n:03d}.json"), "w").write(repr(args))   # one per start (4d: node per start)
 open(os.path.join(d, "ws.addr"), "w").write("127.0.0.1")
 open(os.path.join(d, "ws.port"), "w").write(os.environ["FAKE_WS_PORT"])
-print("soloist 1.3.7.518 build 1788264113 (20260901)", flush=True)
+# the Zero's banner shape (2026-09-06): the child's own log stamp first
+print(time.strftime("%Y-%m-%d %H:%M:%S") + ".123: soloist 1.3.8.13 build 1788609705 (20260905) (g5c3a2053ac) (linux/aarch64)", flush=True)
 print("client expires in 42 days", flush=True)
 mode = os.environ.get("FAKE_MODE", "run")
 if mode == "exit10":

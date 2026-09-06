@@ -45,7 +45,9 @@ print("1. no key -> needs-key, no child OK")
 # 2. ok path
 p, base, data = start_sidecar()
 h = wait_state(base, "ok")
-assert h["days_left"] == 42 and "build" in (h["build"] or "") and h["ws"] is True
+assert h["days_left"] == 42 and h["ws"] is True
+# the banner minus the child's log stamp: stable across children (AM-84)
+assert h["build"] == "soloist 1.3.8.13 build 1788609705 (20260905) (g5c3a2053ac) (linux/aarch64)", h["build"]
 argv = eval(open(os.path.join(data, "argv.json")).read())
 assert argv[argv.index("-d") + 1] == "vibb_bench_node" and argv[argv.index("-k") + 1] == "k" \
     and argv[argv.index("-n") + 1] == "Vibb (test)" and "-z" in argv, argv

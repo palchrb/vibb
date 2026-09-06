@@ -457,7 +457,11 @@ class Engine:
                         self.days_left = int(tok)
                         break
             if "build" in low and self.build is None and "soloist" in low:
-                self.build = line.strip()
+                # the line carries the child's own log stamp ("2026-09-06
+                # 07:00:23.796: soloist 1.3.8.13 build 1788609705 (20260905) …"):
+                # keep it from 'soloist' on, or every child is a "new build" and
+                # the ledger forgets its warmed rows at the end of every pass (AM-84)
+                self.build = line.strip()[low.index("soloist"):].strip()
             # Which line means 'bad key' is NOT documented (AM-47: bench it
             # once with a mangled key); until then the widest honest net.
             if "api key" in low or "api-key" in low or "apikey" in low:
@@ -1052,7 +1056,15 @@ class Engine:
     def _warm_run(self):
         """The pass thread: every queued context in turn on ONE child pinned
         to WARM_NODE, then the child restored onto the kid's node. Whatever
-        happens, the finally restores and lifts the freeze."""
+        happens, the finally restores and lifts the freeze. An ask that lands
+        while the restore is in flight is not lost: one more round."""
+        while True:
+            self._warm_round()
+            with self.lock_warm:
+                if not self._warm_queue or self._warm_abort.is_set() or self.stop.is_set():
+                    return
+
+    def _warm_round(self):
         self._warm_owned = False
         try:
             while not self.stop.is_set():
@@ -1083,11 +1095,14 @@ class Engine:
                 if result.startswith(("aborted", "error", "engine")):
                     break
         finally:
-            self.warm = None
             # ownership lives on self, not in a return value: an abort raised
             # mid-track must still hand the child back (the W3 hole)
             if self._warm_owned:
                 self._warm_restore()
+            # `warming` stays up until the child is back on the kid's node:
+            # the daemon, idle and the tests read "pass over" as "child handed
+            # back" (W1 raced the restore under suite load)
+            self.warm = None
             self._frozen = None
             self._warm_abort.clear()
 
