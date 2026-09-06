@@ -38,6 +38,15 @@ from the ws.addr/ws.port files Soloist writes next to its state. Prints:
           Prints one RESULT line per question. Changes what the box plays —
           bench only, and --mute against a live sink.
 
+  --burst-test <context uri> [--n N] [--mute]
+          Can the resume walk fire its skips without waiting for each
+          track_changed? Plays the context, pauses, then N x skip_next each
+          awaited (the walk today: the per-skip cost), then N x skip_next
+          sent back to back and the track_changed events collected: how
+          many arrived, how long until the last, and whether the history
+          (previous) lists every skipped row in order — i.e. did Soloist
+          serialize them all or drop/coalesce some.
+
 Owner 2026-09-05: "kan vi ikke teste å spørre soloist direkte?"
 """
 import base64
@@ -411,6 +420,85 @@ def queue_test(ws, ctx_uri, at, seek_ms, k, mute):
             wait(ws, "volume_changed", 3)
 
 
+def burst_test(ws, ctx_uri, n, mute):
+    vol = None
+    if mute:
+        vol = _state(ws)["raw"].get("volume")
+        ws.send_json({"type": "command", "command": "set_volume", "volume": 0})
+        wait(ws, "volume_changed", 3)
+    try:
+        t0 = time.monotonic()
+        ws.send_json({"type": "command", "command": "play", "uri": ctx_uri})
+        tc, seen = wait(ws, "track_changed", 15)
+        print(f"1. play context -> track_changed after {time.monotonic() - t0:.2f}s")
+        if not tc:
+            print("   no track_changed — stop"); return
+        ws.send_json({"type": "command", "command": "pause"})
+        wait(ws, "playback_changed", 3)
+        time.sleep(0.5)
+        start = _state(ws)
+        print(f"   at {start['name']!r}, paused")
+
+        # 2. baseline: one skip at a time, each awaited (what the walk does today)
+        per = []
+        for i in range(n):
+            t = time.monotonic()
+            ws.send_json({"type": "command", "command": "skip_next"})
+            tc, seen = wait(ws, "track_changed", 10)
+            per.append(time.monotonic() - t)
+            print(f"   awaited skip {i + 1}: {per[-1]:.2f}s -> {name_of({'item': (tc or {}).get('item')})!r}")
+        print(f"2. RESULT baseline: {n} awaited skips in {sum(per):.2f}s "
+              f"(avg {sum(per) / n:.2f}s, min {min(per):.2f}s, max {max(per):.2f}s)")
+        mid = _state(ws)
+        prev, upc = _queue(ws)
+        expect = [name_of(e) for e in upc[:n]]          # the rows the burst should pass
+        print(f"   now {mid['name']!r}; the next {n} rows: {expect}")
+
+        # 3. burst: all n at once, then collect the track_changed events
+        t0 = time.monotonic()
+        for _ in range(n):
+            ws.send_json({"type": "command", "command": "skip_next"})
+        sent = time.monotonic() - t0
+        arrivals = []
+        errors = 0
+        end = time.monotonic() + 15
+        while len(arrivals) < n and time.monotonic() < end:
+            try:
+                m = ws.recv_json(timeout=max(0.1, end - time.monotonic()))
+            except socket.timeout:
+                break
+            except ConnectionError as e:
+                print(f"   (connection: {e})"); break
+            if not m:
+                continue
+            if m.get("type") == "track_changed":
+                arrivals.append((time.monotonic() - t0, name_of({"item": m.get("item")})))
+            elif m.get("type") == "error":
+                errors += 1
+                print("   error frame:", json.dumps(m)[:200])
+        time.sleep(1.0)
+        after = _state(ws)
+        prev, upc = _queue(ws)
+        hist = [name_of(e) for e in reversed(prev)]      # chronological
+        print(f"3. burst: {n} skip_next sent in {sent * 1000:.0f} ms; track_changed arrived: {len(arrivals)}/{n}"
+              + (f", last at {arrivals[-1][0]:.2f}s" if arrivals else "") + f"; error frames: {errors}")
+        for t, nm in arrivals:
+            print(f"     {t:5.2f}s {nm!r}")
+        print(f"   now {after['name']!r} status={after['status']}; history (oldest first, capped 10): {hist}")
+        landed_ok = after["name"] == (expect[-1] if len(expect) >= n else after["name"])
+        print(f"   RESULT burst: {'LANDED on the expected row' if landed_ok else 'landed elsewhere: expected ' + repr(expect[-1] if expect else None)}"
+              f"; {len(arrivals)} of {n} skips produced a track_changed"
+              + (f"; {sum(per):.2f}s awaited vs {arrivals[-1][0]:.2f}s burst" if arrivals else ""))
+        every = all(x in hist for x in expect[:-1]) if len(expect) >= n else None
+        print(f"   RESULT order: {'every passed row is in the history in order' if every and hist[-len(expect) + 1:] == expect[:-1] else 'history does NOT show every passed row: ' + repr(hist)}")
+        ws.send_json({"type": "command", "command": "pause"})
+        wait(ws, "playback_changed", 3)
+    finally:
+        if mute and vol is not None:
+            ws.send_json({"type": "command", "command": "set_volume", "volume": int(vol)})
+            wait(ws, "volume_changed", 3)
+
+
 def main():
     raw = "--raw" in sys.argv[1:]
     args = sys.argv[1:]
@@ -428,6 +516,11 @@ def main():
     print("connected (Soloist accepts a second client)")
     if play_uri:
         play_and_watch(ws, play_uri, watch_s, mute)
+        return
+    if "--burst-test" in args:
+        ctx = args[args.index("--burst-test") + 1]
+        n = int(args[args.index("--n") + 1]) if "--n" in args else 6
+        burst_test(ws, ctx, n, mute)
         return
     if "--queue-test" in args:
         ctx = args[args.index("--queue-test") + 1]
