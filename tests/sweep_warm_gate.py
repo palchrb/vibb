@@ -8,6 +8,8 @@ against a fake sidecar (the HTTP calls stubbed in place):
      'aborted' -> NOT stamped (an album kind stays due for the next sweep)
   3. the sidecar says done at once -> stamped without a poll loop
   4. under soloist a new Spotify entry defaults to cache: 1 (AM-45)
+  5. two due lists are queued first and share one poll loop; the precache
+     state is stamped per uri from health.warm_done (AM-87)
 """
 import json
 import os
@@ -85,6 +87,20 @@ HEALTH[:] = [{"warming": None}]
 assert lib._warm_entry(URI3, "Album 3") is True and lib._precache_due(URI3) is False
 assert all(c[0] != "/cache/abort" for c in CALLS)
 print("3. done at once -> stamped, no loop OK")
+
+# 5. AM-87: a sweep's due lists go into ONE pass; results per uri from warm_done
+CALLS.clear(); DONE_AT_ONCE[0] = False
+U5, U6 = "spotify:album:a5", "spotify:album:a6"
+HEALTH[:] = [{"warming": {"uri": U5}}, {"warming": {"uri": U6}},
+             {"warming": None, "warm_done": {U5: "done", U6: "partial"},
+              "warm_last": {"uri": U6, "result": "partial"}}]
+res = lib._warm_entries([(U5, "A5"), (U6, "A6")])
+assert res == {U5: True, U6: False}, res
+assert [c for c in CALLS if c[0] == "/cache/download"] == [("/cache/download", {"uri": U5}),
+                                                          ("/cache/download", {"uri": U6})], CALLS
+assert CALLS.count("ps-kick") == 1, CALLS
+assert lib._precache_due(U5) is False and lib._precache_due(U6) is True
+print("5. two due lists: both queued first, one poll loop, stamped per uri from warm_done OK")
 
 # 4. AM-45: the default under soloist
 assert lib._default_cache("https://open.spotify.com/playlist/x") == 1

@@ -61,6 +61,7 @@ def fresh_fake(mode="fast"):
     FAKE.cached_uris = set()
     FAKE.fetch_log = []
     FAKE.received.clear()
+    FAKE.status, FAKE.context, FAKE.idx = "idle", None, 0   # the fake keeps playback across children (AM-88)
 
 
 # ---- W1: the whole pass --------------------------------------------------------
@@ -213,8 +214,27 @@ assert code == 200 and r["ok"], (code, r)
 time.sleep(0.5)
 code, lst = get(base, "/context/tracks?uri=" + CTX)
 assert [x["uri"] for x in lst["tracks"]] == TRACKS and not lst.get("stale"), lst
+# AM-87: a track appended BEHIND the window; after the verify window (5 s
+# here) the next ask is a verify walk: no dwell on the six warm rows, a walk
+# to the last known row, the end-of-order re-query finds the seventh
+time.sleep(5.0)
+TRACKS.append("spotify:track:t6")
+try:
+    FAKE.fetch_log = []
+    code, r = post(base, "/cache/download", {"uri": CTX})
+    assert code == 202, (code, r)
+    h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"] and h["warm_last"]["result"] == "done"
+                 and h["warm_done"].get(CTX) == "done", 90, "verify walk")
+    ledger = json.load(open(os.path.join(data, "vibb", "ledger.json")))
+    assert sorted(ledger[CTX]["warmed"]) == sorted(TRACKS) and len(TRACKS) == 7, ledger[CTX]
+    assert [u for u, _ in FAKE.fetch_log] == ["spotify:track:t6"], FAKE.fetch_log     # only the new row cost a fetch
+    logtxt = open(p.logpath).read()
+    assert logtxt.count("list grew to 7 rows") == 1, logtxt[-1500:]
+finally:
+    TRACKS.pop()
+    FAKE.status, FAKE.context, FAKE.idx = "idle", None, 0   # the fake sat on the popped row
 p.terminate(); p.wait(5)
-print("W11. a 3-row window: the walk grows the order to the real end, a fresh start keeps it OK")
+print("W11. a 3-row window: the walk grows the order to the real end, a fresh start keeps it, a verify finds an appended row OK")
 
 # ---- W12: a ledger row from before AM-85 (no version) owes ONE verify walk ----------
 # same data + cache dirs; the row says done+complete but was judged from one
@@ -234,11 +254,56 @@ assert "one verify walk owed" in open(p.logpath).read()
 assert not FAKE.fetch_log, FAKE.fetch_log
 led = json.load(open(lp))
 assert led[CTX]["v"] == 2 and led[CTX]["complete"] is True and sorted(led[CTX]["warmed"]) == sorted(TRACKS), led[CTX]
+# W11 left a seventh row behind; the list ends at t5 again: the walk cut it (AM-87)
+assert "1 trailing rows gone" in open(p.logpath).read()
+code, lst = get(base, "/context/tracks?uri=" + CTX)
+assert [x["uri"] for x in lst["tracks"]] == TRACKS, lst
 code, r = post(base, "/cache/download", {"uri": CTX})
 assert code == 200 and r["done"] is True, (code, r)
 FAKE.window = None
 p.terminate(); p.wait(5)
 print("W12. a pre-AM-85 ledger row: one verify walk, then instant done again OK")
+
+# ---- W13: two lists asked back to back share ONE ownership (AM-87) -----------------
+fresh_fake("fast")
+install_pw_dump("follow", null=True)
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+CTX2 = "spotify:playlist:q"
+assert post(base, "/cache/download", {"uri": CTX})[0] == 202
+assert post(base, "/cache/download", {"uri": CTX2})[0] == 202
+h = wait_for(base, lambda h: h["warming"] is None and h["warm_done"].get(CTX2), 120, "two passes")
+assert h["warm_done"] == {CTX: "done", CTX2: "done"}, h["warm_done"]
+assert argvs(data) == ["vibb_bench_node", "vibb_null", "vibb_bench_node"], argvs(data)   # one restart pair
+p.terminate(); p.wait(5)
+print("W13. two lists back to back: one restart pair, warm_done per uri OK")
+
+# ---- W14: after a pass, /status is the kid's pre-pass state, not the pass's last track (AM-88)
+fresh_fake("fast")
+install_pw_dump("follow", null=True)
+p, base, data = start_sidecar()
+wait_state(base, "ok")
+assert post(base, "/player/play", {"uri": CTX})[1]["ok"]
+time.sleep(0.3)
+assert post(base, "/player/pause")[1]["ok"]
+time.sleep(0.3)
+st0 = get(base, "/status")[1]
+assert st0["track"]["uri"] == TRACKS[0] and st0["paused"] is True, st0
+post(base, "/cache/download", {"uri": CTX})
+h = wait_for(base, lambda h: h["warming"] is None and h["warm_last"], 90, "pass")
+assert h["warm_last"]["result"] == "done"
+wait_state(base, "ok")
+assert FAKE.idx == len(TRACKS) - 1, FAKE.idx                       # the restored fake sits on the pass's last track
+st = get(base, "/status")[1]
+assert st["track"]["uri"] == TRACKS[0] and st["stopped"] is True, st  # ... but /status says the kid's track
+code, lst = get(base, "/context/tracks?uri=" + CTX)
+assert not lst.get("stale") and lst["length"] == len(TRACKS), lst  # the listing is live again
+assert post(base, "/player/play", {"uri": CTX})[1]["ok"]
+time.sleep(0.5)
+st = get(base, "/status")[1]
+assert st["stopped"] is False and st["track"]["uri"] == TRACKS[0], st
+p.terminate(); p.wait(5)
+print("W14. after a pass /status keeps the kid's track until the box acts OK")
 
 # ---- W6: a stalled link ------------------------------------------------------------
 fresh_fake("stall")

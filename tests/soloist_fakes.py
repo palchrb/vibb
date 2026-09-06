@@ -140,10 +140,12 @@ class FakeSoloist:
                   b"Sec-WebSocket-Accept: " + acc + b"\r\n\r\n")
         self.conn = c
         self._conn_at = time.monotonic()
-        # a new socket is a NEW child: its playback starts idle (the session is
-        # restored, the playback is not) and the old child's fetch died with it
+        # a new socket is a NEW child: the old child's fetch died with it, but
+        # Soloist RESTORES its last playback state (the Zero, 2026-09-06: the
+        # PWA showed the pass's last track after the restore) — keep it
         self._stop_fetch()
-        self.status, self.context, self.idx = "idle", None, 0
+        if self.status == "playing":
+            self.status = "paused"
         try:
             while True:
                 while len(buf) < 2:
@@ -307,7 +309,8 @@ def start_sidecar(key="k", mode="run", data=None, pcm="vibb_bench_node", cache=N
                # 4d timing, scaled for a test: quiet 0.5 s, stall 1.5 s, settle 1 s
                VIBB_WARM_TICK_S="0.1", VIBB_WARM_QUIET_S="0.5", VIBB_WARM_STALL_S="1.5",
                VIBB_WARM_SETTLE_S="1.0", VIBB_WARM_CAP_MIN_S="4",
-               VIBB_SOLOIST_RESTORE_GRACE_S="1.5")   # the fake logs in after 0.6 s
+               VIBB_SOLOIST_RESTORE_GRACE_S="1.5",   # the fake logs in after 0.6 s
+               VIBB_WARM_VERIFY_S="5")               # a done list is re-verified after 5 s here
     if key:
         env["SOLOIST_API_KEY"] = key
     else:

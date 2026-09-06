@@ -98,7 +98,10 @@ WARM_CAP_MIN_S = float(os.environ.get("VIBB_WARM_CAP_MIN_S", "30"))
 WARM_CAP_RATE = 50_000                 # B/s: the cap grows for long tracks on slow links
 WARM_PASS_MAX_S = float(os.environ.get("VIBB_WARM_PASS_MAX_S", str(20 * 60)))
 WARM_PASS_MAX_ITEMS = int(os.environ.get("VIBB_WARM_PASS_MAX_ITEMS", "100"))
-WARM_VERIFY_S = 24 * 3600              # a done context is re-verified at most this often
+# a done context is re-verified at most this often: below the daemon's 6 h
+# sweep so every sweep re-checks the lists for added/removed rows (owner,
+# 2026-09-06; AM-87 — was 24 h)
+WARM_VERIFY_S = float(os.environ.get("VIBB_WARM_VERIFY_S", str(5 * 3600)))
 WARM_LEDGER_TTL_S = 30 * 24 * 3600     # Soloist's own eviction is invisible: re-walk after this
 WARM_MAX_STALLS = 3
 LEDGER_V = 2                           # AM-85: v1 rows called a one-window order 'complete'
@@ -331,6 +334,7 @@ class Engine:
         self.node_override = None              # WARM_NODE while a pass owns the child
         self.warm = None                       # the running pass, or None
         self.warm_last = None                  # the last pass's summary
+        self.warm_done = {}                    # uri -> result for every pass of the running thread (AM-87)
         self._warm_queue = []
         self.lock_warm = threading.Lock()
         self.z_mb = None
@@ -376,6 +380,7 @@ class Engine:
                 "ws": self.ws is not None, "node": self.node, "bound": self.bound,
                 "pending_restart": self.pending_restart, "pairing": self.pairing,
                 "device_name": DEVICE_NAME, "warming": dict(self.warm) if self.warm else None,
+                "warm_done": dict(self.warm_done),
                 "warm_last": self.warm_last, "gen": self.gen}
 
     # ----- the child -----
@@ -584,11 +589,16 @@ class Engine:
                 self.auth = {"logged_in": bool(msg.get("logged_in")),
                              "is_active": bool(msg.get("is_active")),
                              "device_name": msg.get("device_name")}
+                # (is_active is NOT a trigger for lifting the AM-88 snapshot:
+                # every fresh child re-announces it; a phone transfer shows
+                # up as a playing playback_state anyway)
                 self._derive_state()
             elif t == "playback_state":
                 for k in ("status", "item", "context", "position", "volume", "options"):
                     if k in msg:
                         self.pb[k] = msg[k]
+                if msg.get("status") == "playing" and not self._warm_owned:
+                    self._frozen = None        # something real plays: live again (AM-88)
                 if msg.get("item") and self.pending_uri == (msg["item"] or {}).get("uri"):
                     self.pending_uri = None
                 self._derive_state()
@@ -916,6 +926,7 @@ class Engine:
                 self._warm_queue.append({"uri": uri, "budget": budget or {}})
             if self._warm_thread is None or not self._warm_thread.is_alive():
                 self._warm_abort.clear()
+                self.warm_done = {}
                 self._warm_thread = threading.Thread(target=self._warm_run, daemon=True)
                 self._warm_thread.start()
         return 202, {"queued": True, "uri": uri, "queue": len(self._warm_queue)}
@@ -1104,6 +1115,7 @@ class Engine:
                 self._ledger_save()
                 self.warm["result"] = result
                 self.warm_last = {k: v for k, v in self.warm.items() if not k.startswith("_")}
+                self.warm_done[uri] = result
                 log(f"warm: {uri}: {result} ({len(e['warmed'])} warmed)")
                 if result.startswith(("aborted", "error", "engine")):
                     break
@@ -1114,9 +1126,12 @@ class Engine:
                 self._warm_restore()
             # `warming` stays up until the child is back on the kid's node:
             # the daemon, idle and the tests read "pass over" as "child handed
-            # back" (W1 raced the restore under suite load)
+            # back" (W1 raced the restore under suite load). The /status
+            # snapshot is NOT dropped here: the restored Soloist remembers its
+            # own last item — the last track the pass warmed — and the PWA
+            # showed that instead of the kid's track (owner, 2026-09-06,
+            # AM-88). It stands until the kid or the phone acts.
             self.warm = None
-            self._frozen = None
             self._warm_abort.clear()
 
     def _warm_own(self):
@@ -1148,6 +1163,26 @@ class Engine:
         self._warm_owned = False
         if self.node == WARM_NODE:
             self.set_state("audio-unbound")
+
+    def _trim_after(self, uri, e, order, cur):
+        """The context ended at `cur`: rows remembered AFTER it are gone from
+        the list — removed at the tail, which the start-window fingerprint
+        cannot see (AM-87). The order is cut there and those rows leave
+        `warmed`, so the listing and the bookmark rule stop naming them."""
+        if not cur or cur not in order or order.index(cur) >= len(order) - 1:
+            return
+        keep = order.index(cur) + 1
+        gone = order[keep:]
+        del order[keep:]
+        rec = self.orders.get(uri)
+        if rec:
+            rec["tracks"] = list(order)
+            try:
+                _save_json(_order_path(uri), rec)
+            except OSError:
+                pass
+        e["warmed"] = [u for u in e["warmed"] if u not in gone]
+        log(f"warm: {uri}: {len(gone)} trailing rows gone from the list")
 
     def _warm_one(self, uri):
         """One context: decide from the ledger, own the child if needed, play
@@ -1200,10 +1235,15 @@ class Engine:
             raise WarmAborted("mis-bound")
         targets = [u for u in order if u not in e["warmed"] and u not in e["unavailable"]]
         self.warm["n"] = len(targets)
-        if not targets and not rec.get("complete"):
-            # everything remembered is warm but the order was never proven
-            # complete (AM-85): walk on to find the end
-            targets = order[-1:] if order else []
+        shown = {t["uri"] for t in (rows or [])}
+        if not targets and order and (not rec.get("complete") or order[-1] not in shown):
+            # everything remembered is warm, but either the order was never
+            # proven complete (AM-85) or the start window does not reach its
+            # last row (the Zero: 10 upcoming) — rows added beyond the window
+            # are invisible from here, so walk to the last known row (0.35 s
+            # a skip, no dwell) and let the end-of-order re-query find them.
+            # A list the window covers whole is verified with no skip (AM-87).
+            targets = order[-1:]
         if not targets:
             e["verified_at"] = time.time()
             self._step(self.cmd, "pause")
@@ -1217,6 +1257,7 @@ class Engine:
                 # walk to the next wanted item; a whole file is skipped through
                 # in a beat, and a skip lands the prefetch block only
                 if self._queue_ends():
+                    self._trim_after(uri, e, order, cur)
                     break
                 since = self.mark()
                 before = self._cache_files()
@@ -1253,6 +1294,7 @@ class Engine:
                 if targets:
                     log(f"warm: {uri}: list grew to {len(order)} rows")
             if self._queue_ends():
+                self._trim_after(uri, e, order, cur)
                 break
             since = self.mark()
             before = self._cache_files()
@@ -1446,7 +1488,7 @@ class Engine:
         but empty — the daemon's 'spotify-listing-unavailable' path."""
         with self.mirror_lock:
             active = (self.pb.get("context") or {}).get("uri")
-        if self._frozen is not None or not active or uri != active:
+        if self._warm_owned or not active or uri != active:
             # not the live context (or the pass owns the child): from disk,
             # marked stale (AM-74) — the picker may use it, the Sonos hand-off
             # must not trust its indices
@@ -1522,7 +1564,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             with ENGINE.lock:
-                warming = ENGINE.warm is not None or ENGINE._frozen is not None
+                warming = ENGINE.warm is not None or ENGINE._warm_owned
                 if warming and path in ("/player/play", "/player/resume", "/player/playpause",
                                         "/player/next", "/player/prev", "/player/seek"):
                     # AM-65: the kid comes first — abort, wait for the pass to
@@ -1535,6 +1577,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif warming and path in ("/player/pause", "/player/volume", "/player/shuffle_context"):
                     self._send(200, {"ok": True, "result": {"type": "command_result", "warming": True}})
                     return
+                if path.startswith("/player/"):
+                    ENGINE._frozen = None      # the box acts: the live child speaks for itself (AM-88)
                 if path == "/player/play":
                     ok, r = ENGINE.play(body)
                 elif path == "/player/pause":

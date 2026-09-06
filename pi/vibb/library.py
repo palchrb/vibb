@@ -410,41 +410,57 @@ def _warm_health():
 
 
 def _warm_entry(uri, name):
-    """POST /cache/download to soloistd and STAY with the pass: touch BUSY
-    and the warming marker every WARM_POLL_S while it runs, abort it the
-    moment the box turns audible (AM-67), and stamp the library's
-    precache state ONLY when the sidecar says done (AM-70) — an aborted,
-    stalled or partial pass stays due for the next sweep."""
+    """One entry — see _warm_entries."""
+    return _warm_entries([(uri, name)]).get(uri, False)
+
+
+def _warm_entries(items):
+    """POST /cache/download for EVERY due Spotify entry first, then STAY with
+    the pass: one queue = one ownership of the child = one restart pair for
+    all the lists of a sweep (AM-87), not one per list. While it runs: touch
+    BUSY and the warming marker every WARM_POLL_S, abort the moment the box
+    turns audible (AM-67). The library's precache state is stamped ONLY for
+    the uris the sidecar reports done (health.warm_done, per uri; AM-70) —
+    an aborted, stalled or partial pass stays due for the next sweep.
+    Returns {uri: stamped}."""
+    out = {}
     try:
         _radio.wait_paging_clear()
     except Exception:
         pass
-    try:
-        out = json.loads(spotify.go("/cache/download", timeout=10, body={"uri": uri}) or b"{}")
-    except (OSError, ValueError) as exc:
-        log(f"warm {name}: {exc!r}")
-        return False
-    if out.get("done"):
-        log(f"warm {name}: already done ({out.get('warmed')} warmed)")
-        _precache_done(uri)
-        return True
-    log(f"warm {name}: queued")
+    pending = []
+    for uri, name in items:
+        try:
+            r = json.loads(spotify.go("/cache/download", timeout=10, body={"uri": uri}) or b"{}")
+        except (OSError, ValueError) as exc:
+            log(f"warm {name}: {exc!r}")
+            out[uri] = False
+            continue
+        if r.get("done"):
+            log(f"warm {name}: already done ({r.get('warmed')} warmed)")
+            _precache_done(uri)
+            out[uri] = True
+            continue
+        log(f"warm {name}: queued")
+        pending.append((uri, name))
+    if not pending:
+        return out
     if WARM_START:
         try:
             WARM_START()
         except Exception:
             pass
     t0 = time.monotonic()
+    budget = WARM_MAX_S * len(pending)
     aborted = False
     while True:
         _radio.touch_busy()
         _radio.touch_warming()
         h = _warm_health()
-        w = h.get("warming")
-        if not w:
+        if not h.get("warming"):
             break
-        if not aborted and (_busy() or time.monotonic() - t0 > WARM_MAX_S):
-            log(f"warm {name}: box busy — aborting the pass")
+        if not aborted and (_busy() or time.monotonic() - t0 > budget):
+            log("warm: box busy — aborting the pass")
             try:
                 spotify.go("/cache/abort", timeout=25)
             except OSError:
@@ -452,14 +468,22 @@ def _warm_entry(uri, name):
             aborted = True
         _sync_wake.wait(WARM_POLL_S)
         _sync_wake.clear()
+    done = h.get("warm_done") or {}
     last = h.get("warm_last") or {}
-    result = last.get("result") if last.get("uri") == uri else None
-    if result == "done":
-        log(f"warm {name}: done")
-        _precache_done(uri)
-        return True
-    log(f"warm {name}: {result or 'no result'} — stays due")
-    return False
+    for uri, name in pending:
+        result = done.get(uri)
+        if result is None and last.get("uri") == uri:
+            result = last.get("result")          # an older sidecar: the last pass only
+        if result == "done":
+            log(f"warm {name}: done")
+            _precache_done(uri)
+            out[uri] = True
+        else:
+            log(f"warm {name}: {result or 'no result'} — stays due")
+            out[uri] = False
+    return out
+
+
 _PENDING_SNAP = {}  # uri -> snapshot observed by the due-check
 
 
@@ -623,6 +647,7 @@ def _cache_sweeper():
             content.shrink_covers()  # one-time downscale of old full-size art
         except Exception as exc:
             log(f"cover shrink failed: {exc!r}")
+        warm_batch = []   # (uri, name) of every due Spotify list under soloist (AM-87)
         for s in lib["sections"]:
             for e in s["entries"]:
                 n = e.get("cache") or 0
@@ -639,13 +664,14 @@ def _cache_sweeper():
                     # breaker), skips already-cached tracks, so a repeat
                     # request per sweep is cheap. Same discipline as the
                     # podcast syncs: only fires when nothing is audible.
+                    if _soloist():
+                        # 4d: every due list into ONE pass after the walk
+                        # over the library (AM-87) — one restart pair
+                        warm_batch.append((uri, e["name"]))
+                        continue
                     while _busy():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                         _sync_wake.clear()
-                    if _soloist():
-                        # 4d: the POST is the pass; stay with it (AM-37/67/70)
-                        _warm_entry(uri, e["name"])
-                        continue
                     try:
                         spotify.go("/cache/download", timeout=10,
                                    body={"uri": uri})
@@ -727,6 +753,11 @@ def _cache_sweeper():
                     pass
                 _sync_wake.wait(SYNC_STAGGER_S)  # breathe between entries
                 _sync_wake.clear()
+        if warm_batch:
+            while _busy():
+                _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+                _sync_wake.clear()
+            _warm_entries(warm_batch)
         _stamp_sweep()
         try:
             _precache_prune({spotify.to_uri(e["target"])
