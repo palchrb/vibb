@@ -23,6 +23,7 @@ ws.addr/ws.port, prints the expiry line, sleeps — or exits 10).
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -282,5 +283,63 @@ try:
 finally:
     FAKE.logged_in = True
 print(f"10. restore grace: 'starting' while the session restores, needs-pair after {dt:.1f}s OK")
+
+# 11. AM-90: a play INSIDE the context Soloist already holds walks from where
+#     it stands — no `play <uri>` restart, no wait for a track_changed that
+#     cannot come; a short way back = seek 0 + skip_prev; farther back = a
+#     restart at row 0; a retry for the current row is a no-op. And while the
+#     walk passes rows, /status names the TARGET (the pending card).
+FAKE.status, FAKE.context, FAKE.idx = "idle", None, 0
+os.environ["VIBB_WALK_BACK_MAX"] = "2"
+install_pw_dump(1)
+p, base, data = start_sidecar()
+del os.environ["VIBB_WALK_BACK_MAX"]
+wait_state(base, "ok")
+assert post(base, "/player/play", {"uri": CTX})[1]["ok"]          # row 0 plays; the list is remembered
+time.sleep(0.5)
+FAKE.received.clear(); FAKE.skip_delay_s = 0.4
+t0 = time.monotonic()
+th = threading.Thread(target=lambda: post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[3]}))
+th.start()
+card = None
+for _ in range(60):
+    st = get(base, "/status")[1]
+    if st.get("pending_track_uri") == TRACKS[3]:
+        card = (st.get("track") or {}).get("uri")
+        break
+    time.sleep(0.05)
+th.join(20); dt = time.monotonic() - t0
+cmds = [m["command"] for m in FAKE.received]
+assert not any(m.get("uri") for m in FAKE.received if m["command"] == "play"), cmds   # no restart
+assert cmds.count("skip_next") == 3 and "skip_prev" not in cmds, cmds
+assert dt < 6, f"walked in {dt:.1f}s (a 15 s wait would show here)"
+assert card == TRACKS[3], f"the card named {card} while the walk ran, not the target"
+st = get(base, "/status")[1]
+assert st["track"]["uri"] == TRACKS[3] and st["pending_track_uri"] is None and st["paused"] is False, st
+FAKE.skip_delay_s = 0.0
+# two rows back: seek 0, then skip_prev x2; the position asked for lands after
+FAKE.received.clear()
+assert post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[1], "position": 30000})[1]["ok"]
+cmds = [m["command"] for m in FAKE.received]
+assert cmds.count("skip_prev") == 2 and "skip_next" not in cmds, cmds
+assert not any(m.get("uri") for m in FAKE.received if m["command"] == "play"), cmds
+seeks = [m["position_ms"] for m in FAKE.received if m["command"] == "seek"]
+assert seeks == [0, 30000] and cmds.index("seek") < cmds.index("skip_prev"), (seeks, cmds)
+assert get(base, "/status")[1]["track"]["uri"] == TRACKS[1]
+# the player's retry for the row already current: nothing moves
+FAKE.received.clear()
+assert post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[1]})[1]["ok"]
+cmds = [m["command"] for m in FAKE.received]
+assert "skip_next" not in cmds and "skip_prev" not in cmds and not any(m.get("uri") for m in FAKE.received if m["command"] == "play"), cmds
+# far back (3 rows > WALK_BACK_MAX 2, from row 4): restart at row 0, then forward
+assert post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[4]})[1]["ok"]
+FAKE.received.clear()
+assert post(base, "/player/play", {"uri": CTX, "skip_to_uri": TRACKS[1]})[1]["ok"]
+cmds = [m["command"] for m in FAKE.received]
+assert any(m.get("uri") == CTX for m in FAKE.received if m["command"] == "play"), cmds   # the restart
+assert cmds.count("skip_next") == 1 and "skip_prev" not in cmds, cmds
+assert get(base, "/status")[1]["track"]["uri"] == TRACKS[1]
+p.terminate(); p.wait(5)
+print("11. same-context play: walk from here (no restart, no 15 s wait), prev for a short way back, retry no-op, the card names the target OK")
 
 print("\nall soloist_sidecar checks passed")

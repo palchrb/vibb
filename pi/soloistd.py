@@ -68,6 +68,11 @@ IDLE_RESTART_S = float(os.environ.get("VIBB_SOLOIST_IDLE_RESTART_S", "600"))  # 
 PAIR_MAX_S = float(os.environ.get("VIBB_SOLOIST_PAIR_MAX_S", "180"))
 WALK_MAX_SKIPS = 300                 # a 500-item context is a Web-API job (P2)
 WALK_MAX_S = 25.0
+WALK_STEP_WAIT_S = 3.0               # per skip: the Zero answers in 0.15 s (AM-90)
+# a target this many rows BEHIND the current one is walked back with skip_prev
+# (after a seek to 0, so 'prev' means previous, not restart); farther back the
+# context is restarted at row 0 and walked forward
+WALK_BACK_MAX = int(os.environ.get("VIBB_WALK_BACK_MAX", "10"))
 # Below the daemon's 5 s per request (vibb.spotify.go): a command that Soloist
 # does not ack in time must come back as an error, never as a socket
 # timeout the daemon reads as "engine down" (Zero 2026-09-05: the Sonos
@@ -1333,6 +1338,12 @@ class Engine:
         if pb.get("status") == "playing" and pos.get("timestamp_ms"):
             position_ms += (time.time() * 1000 - pos["timestamp_ms"]) * (pos.get("speed") or 1.0)
         track = entity_to_track(pb.get("item"), position_ms)
+        if pending and pending != (track or {}).get("uri") and self.meta.get(pending):
+            # AM-90: the walk passes other rows on its way to `pending` —
+            # the card names the TARGET (from the metadata store), from the
+            # first second, never a row it merely passes
+            track = dict(self.meta[pending])
+            track["position"] = 0
         ctx = (pb.get("context") or {}).get("uri")
         origin = BOX_ORIGIN if (ctx and ctx == self.box_context) or not track else "remote"
         st = {"username": auth["device_name"] or DEVICE_NAME if auth["logged_in"] else None,
@@ -1356,8 +1367,16 @@ class Engine:
         if not uri:                                  # bare resume
             return self.cmd("play")
         self.box_context = uri
-        with self.mirror_lock:            # optimistic: context_changed confirms it
-            self.pb["context"] = {"uri": uri}
+        with self.mirror_lock:
+            active = (self.pb.get("context") or {}).get("uri")
+            cur = (self.pb.get("item") or {}).get("uri")
+            self.pb["context"] = {"uri": uri}        # optimistic: context_changed confirms it
+        # AM-90: a context Soloist already holds is walked from where it stands.
+        # A second `play <uri>` would restart it at row 0 — and Soloist sends
+        # no track_changed when that changes nothing, which play() then waited
+        # 15 s for (the Zero, 2026-09-06 08:11); the player's retry restarted
+        # the list a second time on top of it.
+        same = bool(target) and active == uri and cur is not None
         shroud = None
         if target or position:
             with self.mirror_lock:
@@ -1365,31 +1384,20 @@ class Engine:
             self.cmd("set_volume", volume=0)
         try:
             self.pending_uri = target or None
-            since = self.mark()
-            ok, r = self.cmd("play", uri=uri)
-            if not ok:
-                return ok, r
-            self.wait_event("track_changed", 15, since)
-            # the whole list is visible NOW (previous empty, upcoming = the
-            # rest): remember it before the walk's skips push the first
-            # tracks out of Soloist's 10-deep history (AM-60)
-            self._snapshot_listing(uri)
+            if not same:
+                since = self.mark()
+                ok, r = self.cmd("play", uri=uri)
+                if not ok:
+                    return ok, r
+                # a restart of the active context at its first row may change
+                # nothing: a short wait then, the full one for a new context
+                self.wait_event("track_changed", 15 if active != uri else 3, since)
+                # the whole list is visible NOW (previous empty, upcoming = the
+                # rest): remember it before the walk's skips push the first
+                # tracks out of Soloist's 10-deep history (AM-60)
+                self._snapshot_listing(uri)
             if target:
-                self.cmd("pause")
-                t0 = time.monotonic()
-                for _ in range(WALK_MAX_SKIPS):
-                    with self.mirror_lock:
-                        cur = ((self.pb.get("item") or {}).get("uri"))
-                    if cur == target:
-                        break
-                    if time.monotonic() - t0 > WALK_MAX_S:
-                        log(f"resume walk gave up after {WALK_MAX_S:.0f}s (at {cur})")
-                        break
-                    since = self.mark()
-                    ok, r = self.cmd("skip_next")
-                    if not ok:
-                        break
-                    self.wait_event("track_changed", 10, since)
+                self._walk_to(uri, target)
             if position:
                 self.cmd("seek", position_ms=position)
             if target:
@@ -1398,6 +1406,46 @@ class Engine:
         finally:
             if shroud is not None:
                 self.cmd("set_volume", volume=int(shroud))
+
+    def _walk_to(self, uri, target):
+        """Skip to `target` inside the loaded context: forward with skip_next,
+        a short way back with skip_prev (after a seek to 0 so prev means
+        previous, not restart), farther back by restarting the context at
+        row 0 and walking forward. A target already current is a no-op (the
+        player's retry). Paused while it walks; the caller plays."""
+        with self.mirror_lock:
+            cur = (self.pb.get("item") or {}).get("uri")
+        if cur == target:
+            return
+        order = list((self.orders.get(uri) or {}).get("tracks") or [])
+        back = 0
+        if cur in order and target in order and order.index(target) < order.index(cur):
+            back = order.index(cur) - order.index(target)
+        self.cmd("pause")
+        if back > WALK_BACK_MAX:
+            since = self.mark()
+            ok, _r = self.cmd("play", uri=uri)
+            if ok:
+                self.wait_event("track_changed", 15, since)
+                self.cmd("pause")
+            back = 0
+        elif back:
+            self.cmd("seek", position_ms=0)
+        step = "skip_prev" if back else "skip_next"
+        t0 = time.monotonic()
+        for _ in range(WALK_MAX_SKIPS):
+            with self.mirror_lock:
+                cur = (self.pb.get("item") or {}).get("uri")
+            if cur == target:
+                break
+            if time.monotonic() - t0 > WALK_MAX_S:
+                log(f"resume walk gave up after {WALK_MAX_S:.0f}s (at {cur})")
+                break
+            since = self.mark()
+            ok, _r = self.cmd(step)
+            if not ok:
+                break
+            self.wait_event("track_changed", WALK_STEP_WAIT_S, since)
 
     def _queue_rows(self):
         """One get_queue: (tracks in play order, fresh_start) or (None, False)

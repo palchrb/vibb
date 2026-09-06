@@ -57,6 +57,7 @@ class FakeSoloist:
         self.cache_dir = None            # set by start_sidecar (CACHE_DIRECTORY)
         self.fetch_mode = "fast"         # fast | slow | stall | none
         self.window = None               # upcoming rows per get_queue (the Zero: 10; None = all)
+        self.skip_delay_s = 0.0          # the Zero: ~0.15 s per skip (AM-90)
         self.tail_b = 0                  # the Zero: a ~17 KB tail lands ~3 s after the whole file
         self.tail_delay_s = 1.0          # ... whatever the player does meanwhile (skip included)
         self.cached_uris = set()         # already in the cache: nothing is written
@@ -225,6 +226,8 @@ class FakeSoloist:
             self.status = "paused"; self.send({"type": "playback_changed", "status": "paused"})
             self._stop_fetch()
         elif cmd in ("skip_next", "skip_prev"):
+            if self.skip_delay_s:
+                time.sleep(self.skip_delay_s)
             self.idx = min(len(TRACKS) - 1, self.idx + 1) if cmd == "skip_next" else max(0, self.idx - 1)
             self.send({"type": "track_changed", "item": self.item(self.idx)})
             if self.status == "playing":
