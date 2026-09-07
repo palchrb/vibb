@@ -49,8 +49,10 @@ _as_say() { echo "    audio stack: $*"; }
 
 audio_stack_peek() {
   # the same resolution as audio_stack_resolve, WITHOUT the write — for
-  # decisions that must refuse before anything is touched (the engine toggle)
-  local want="${VIBB_AUDIO_STACK:-}"
+  # decisions that must refuse before anything is touched (the engine toggle);
+  # once resolve ran in this process its answer wins (the file is written
+  # only after a successful apply now)
+  local want="${VIBB_AUDIO_STACK:-${AUDIO_STACK:-}}"
   if [[ -z $want && -r $_AS_STACK_FILE ]]; then
     want="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
   fi
@@ -67,9 +69,24 @@ audio_stack_resolve() {
     ""|bluealsa) AUDIO_STACK=bluealsa ;;
     *) echo "VIBB_AUDIO_STACK must be bluealsa or pipewire (got '$want')" >&2; return 1 ;;
   esac
+  _as_say "$AUDIO_STACK"
+}
+
+audio_stack_recorded() {
+  # the stack the LAST successful apply recorded (bluealsa when none) — what
+  # a box in service is running right now, whatever this run asks for
+  local rec=""
+  [[ -r $_AS_STACK_FILE ]] && rec="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
+  [[ $rec == pipewire ]] && echo pipewire || echo bluealsa
+}
+
+_as_record_stack() {
+  # written only after apply succeeded (AM-95 (5)): an aborted flip used to
+  # leave a file saying 'pipewire' while bluealsa served — every reader
+  # (audio.stack(), the route, extra.sh) then took the wrong path
   mkdir -p "$(dirname "$_AS_STACK_FILE")"
   printf '%s\n' "$AUDIO_STACK" > "$_AS_STACK_FILE"
-  _as_say "$AUDIO_STACK ($_AS_STACK_FILE)"
+  _as_say "recorded $AUDIO_STACK ($_AS_STACK_FILE)"
 }
 
 audio_stack_packages() {
@@ -372,6 +389,7 @@ audio_stack_apply() {
       systemctl mask --now "$u" >/dev/null 2>&1 || true
     done
     _as_mask_idle_units
+    _as_record_stack
     _as_say "PipeWire system units up; bluealsa masked (rollback: VIBB_AUDIO_STACK=bluealsa ./install.sh)"
   else
     if [[ -e $_AS_ETC/systemd/system/pipewire.service ]]; then
@@ -391,6 +409,7 @@ audio_stack_apply() {
     systemctl enable --now bluealsa.service 2>/dev/null \
       || systemctl enable --now bluealsad.service
     _as_mask_idle_units
+    _as_record_stack
   fi
 }
 

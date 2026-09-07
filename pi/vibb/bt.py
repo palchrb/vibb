@@ -500,7 +500,11 @@ def _route_alsa(mac):
     try:
         with open(ASOUND) as f:
             cur = f.read()
-        if mac in cur and (bt_node is None or bt_node in cur):
+        # idempotence is per FORMAT: a rollback to bluealsa found the MAC in
+        # the PipeWire text ("# bt speaker <MAC>") and left both pcms pointing
+        # at a masked server — a silent box on both outputs (AM-95 (1))
+        marker = "type pipewire" if bt_node else "type bluealsa"
+        if mac in cur and marker in cur and (bt_node is None or bt_node in cur):
             return
     except OSError:
         pass

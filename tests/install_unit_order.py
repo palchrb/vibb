@@ -38,6 +38,12 @@ assert 'if [[ $AUDIO_STACK == bluealsa ]]; then' in src[i_ph - 300:i_ph], \
 i_pkg = src.index('for f in "$SCRIPT_DIR"/vibb/*.py; do')
 i_route = src.index("\naudio_stack_route\n")   # the call, not the comment naming it
 i_apply = src.index("\naudio_stack_apply\n")
+# AM-95 (2): a stack FLIP stops the daemon + btwatchd before apply (they hold
+# the old stack's ALSA devices); guarded on the recorded stack, so a re-run
+# on the same stack touches nothing
+i_stop = src.index("systemctl stop vibb-daemon.service vibb-bt-reconnect.service")
+assert i_res < i_stop < i_apply, "the quiesce sits between resolve and apply"
+assert 'if [[ "$(audio_stack_recorded)" != "$AUDIO_STACK" ]]' in src[i_stop - 200:i_stop], "guarded on a flip"
 assert i_apply < i_pkg < i_route, "route after the package install and after apply"
 print("2. placeholder bluealsa-only; route after package + apply OK")
 

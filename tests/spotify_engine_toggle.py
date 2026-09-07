@@ -16,6 +16,7 @@ step 3, AM-53).
      disabled + masked, go-librespot unmasked, config.yml byte-identical
   5. a failed apply never records the engine
 """
+import json
 import os
 import re
 import subprocess
@@ -155,5 +156,45 @@ print("4. rollback: sidecar masked, go-librespot back, config.yml untouched OK")
 r, calls, rec, _ = run("soloist", "pipewire", fail_enable=True)
 assert r.returncode != 0 and rec is None, (r.returncode, rec)
 print("5. failed apply -> engine not recorded OK")
+
+# 6. AM-95: a box coming from go-librespot — the precache ledger dropped, the
+#    old audio cache removed, Spotify entries cache 0 -> 1 (others kept), the
+#    first Soloist build fetched with --force when no binary exists; a second
+#    apply on the same (now soloist) tree repeats none of it
+root = tempfile.mkdtemp()
+st = os.path.join(root, "var/lib/vibb/state"); os.makedirs(st)
+open(os.path.join(st, "spotify-precache.json"), "w").write('{"spotify:album:a": "queued"}')
+cache = os.path.join(root, "var/lib/vibb/spotify-cache"); os.makedirs(cache)
+open(os.path.join(cache, "x.bin"), "w").write("x" * 10)
+os.makedirs(os.path.join(root, "etc/vibb"), exist_ok=True)
+lib = {"sections": [{"entries": [
+    {"name": "L1", "target": "https://open.spotify.com/playlist/aaa", "cache": 0},
+    {"name": "L2", "target": "spotify:album:bbb", "cache": 5},
+    {"name": "P", "target": "https://example.com/feed.xml", "cache": 0}]}]}
+json.dump(lib, open(os.path.join(root, "etc/vibb/library.json"), "w"))
+fetch_log = os.path.join(root, "fetch.log")
+fake_upd = os.path.join(root, "fake-updater")
+open(fake_upd, "w").write(f'#!/bin/sh\necho "updater $@" >> {fetch_log}\n'); os.chmod(fake_upd, 0o755)
+os.environ["VIBB_SOLOIST_UPDATER"] = fake_upd
+try:
+    r, calls, rec, _ = run("soloist", "pipewire", root=root)
+    assert r.returncode == 0, r.stderr
+    assert not os.path.exists(os.path.join(st, "spotify-precache.json")), "precache ledger dropped"
+    assert not os.path.exists(cache), "go-librespot cache removed"
+    got = json.load(open(os.path.join(root, "etc/vibb/library.json")))["sections"][0]["entries"]
+    assert [e["cache"] for e in got] == [1, 5, 0], got
+    assert "switched cache 0 -> 1" in r.stdout, r.stdout
+    assert open(fetch_log).read().strip() == "updater --force", "no binary: one forced fetch"
+    # second apply: already soloist -> nothing repeated; a binary present -> no fetch
+    open(os.path.join(st, "spotify-precache.json"), "w").write("{}")
+    os.makedirs(os.path.join(root, "usr/local/bin"), exist_ok=True)
+    binp = os.path.join(root, "usr/local/bin/soloist"); open(binp, "w").write("#!/bin/sh\n"); os.chmod(binp, 0o755)
+    r, calls, rec, _ = run("soloist", "pipewire", root=root)
+    assert r.returncode == 0, r.stderr
+    assert os.path.exists(os.path.join(st, "spotify-precache.json")), "no migration on a soloist tree"
+    assert open(fetch_log).read().strip() == "updater --force", "no second fetch with a binary present"
+finally:
+    del os.environ["VIBB_SOLOIST_UPDATER"]
+print("6. from go-librespot: ledger dropped, cache removed, cache 0->1, forced first fetch; not repeated OK")
 
 print("\nall spotify_engine_toggle checks passed")

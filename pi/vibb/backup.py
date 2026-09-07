@@ -109,13 +109,28 @@ def _config_files():
     return out
 
 
+# the Soloist engine (AM-95 (11)): the API key file is SECRET, the paired
+# session Soloist keeps in its data dir is SECRET (a restore without it lands
+# in needs-pair), the sidecar's remembered lists/ledger/metadata are PROGRESS
+SOLOIST_ENV = os.environ.get("VIBB_SOLOIST_ENV", os.path.join(ETC, "soloist.env"))
+SOLOIST_DATA = os.environ.get("VIBB_SOLOIST_DATA", "/var/lib/vibb-soloist")
+
+
 def _secret_files():
-    out = [p for p in (STORYTEL_CREDS, SPOTIFY_API_CREDS) if os.path.exists(p)]
+    out = [p for p in (STORYTEL_CREDS, SPOTIFY_API_CREDS, SOLOIST_ENV) if os.path.exists(p)]
     if GO_DIR:
         for name in ("credentials.json", "state.json"):
             p = os.path.join(GO_DIR, name)
             if os.path.exists(p):
                 out.append(p)
+    try:
+        for name in sorted(os.listdir(SOLOIST_DATA)):
+            p = os.path.join(SOLOIST_DATA, name)
+            # ws.addr/ws.port are runtime; the store is progress (below)
+            if os.path.isfile(p) and not name.startswith("ws."):
+                out.append(p)
+    except OSError:
+        pass
     return out
 
 
@@ -124,11 +139,16 @@ def _progress_files():
     try:
         names = sorted(os.listdir(STATE_DIR))
     except OSError:
-        return out
+        names = []
     for name in names:
         if not name.endswith(".json") or name in _STATE_EXCLUDE:
             continue
         out.append(os.path.join(STATE_DIR, name))
+    store = os.path.join(SOLOIST_DATA, "vibb")
+    for root, _dirs, files in os.walk(store):
+        for name in sorted(files):
+            if name.endswith(".json"):
+                out.append(os.path.join(root, name))
     return out
 
 

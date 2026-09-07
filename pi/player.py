@@ -214,7 +214,10 @@ def accept_spot_bookmark(bm, uri, exact=False):
         try:
             d = spotify.context_tracks(uri, timeout=2, settle_s=0) or {}
             known = [t.get("uri") for t in (d.get("tracks") or [])]
-            if known and bm["uri"] not in known:
+            # only a list proven COMPLETE may reject: after one play the store
+            # holds a single ~20-row window, and a bookmark at row 40 read as
+            # "no longer in the list" — a clean start from row 0 (AM-95 (6))
+            if known and d.get("complete") and bm["uri"] not in known:
                 log(f"bookmark track {bm['uri']} is no longer in the list — clean start")
                 return None
         except (OSError, ValueError):

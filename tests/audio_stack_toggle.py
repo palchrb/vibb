@@ -247,3 +247,16 @@ assert "AFTER: wireplumber.service" in r.stdout
 print("5. unit env per stack, endpoint owner for After= OK")
 
 print("\nall audio_stack_toggle checks passed")
+
+
+# AM-95 (5): /etc/vibb/audio-stack is written only after a SUCCESSFUL apply
+root_ok = tempfile.mkdtemp()
+r, calls = run("pipewire", root_ok)
+assert r.returncode == 0, r.stderr
+assert open(os.path.join(root_ok, "etc/vibb/audio-stack")).read().strip() == "pipewire"
+root_bad = tempfile.mkdtemp()
+r, calls = run("pipewire", root_bad, fake_pw_starts="0")
+assert r.returncode != 0
+p = os.path.join(root_bad, "etc/vibb/audio-stack")
+assert not os.path.exists(p) or open(p).read().strip() != "pipewire", "a failed flip must not record pipewire"
+print("13. the stack file records only a successful apply OK")

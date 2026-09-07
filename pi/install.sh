@@ -526,6 +526,14 @@ fi
 systemctl enable --now bluetooth.service
 # The audio stack: bluealsa's daemon (today) or the PipeWire system units —
 # and the rollback between them. Everything in audio-stack.sh.
+# A stack flip on a box in service (AM-95 (2)): the running daemon and
+# btwatchd hold the old stack's ALSA devices and would race the new one
+# (advance storm, bookmarks rewritten per track, the HAT opened directly).
+# Quiet them first; step 6 enables them again on the new stack.
+if [[ "$(audio_stack_recorded)" != "$AUDIO_STACK" ]]; then
+  echo "    audio stack $(audio_stack_recorded) -> $AUDIO_STACK: stopping vibb-daemon + vibb-bt-reconnect first"
+  systemctl stop vibb-daemon.service vibb-bt-reconnect.service 2>/dev/null || true
+fi
 audio_stack_apply
 
 BA_UNIT=""   # stays empty under pipewire (set -u: the block below reads it)

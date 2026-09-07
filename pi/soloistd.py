@@ -1543,20 +1543,25 @@ class Engine:
             rows = self._remembered(uri)
             rec = self.orders.get(uri) or {}
             return {"ready": True, "cached": len(rows), "length": len(rows), "tracks": rows,
-                    "stale": True, "remembered_at": rec.get("remembered_at")}
+                    "stale": True, "remembered_at": rec.get("remembered_at"),
+                    "complete": bool(rec.get("complete"))}
         tracks, fresh = self._queue_rows()
         if tracks is None:
             cached = self._remembered(uri)
             if cached:
                 log(f"listing: soloist slow — serving the remembered list ({len(cached)} rows)")
-                return {"ready": True, "cached": len(cached), "length": len(cached), "tracks": cached}
+                return {"ready": True, "cached": len(cached), "length": len(cached), "tracks": cached,
+                        "complete": bool((self.orders.get(uri) or {}).get("complete"))}
             log("listing: soloist slow and nothing remembered — not ready yet")
             return {"ready": False, "cached": 0, "length": 0, "tracks": []}
         self._remember(uri, tracks, fresh)
         out = self._remembered(uri) or tracks
         # cached = a COUNT (the fork dialect): the picker computes pending =
-        # cached < length, and a bool made every list "still filling" (AM-74)
-        return {"ready": True, "cached": len(out), "length": len(out), "tracks": out}
+        # cached < length, and a bool made every list "still filling" (AM-74).
+        # complete = the order reached the context's end (a walk proved it):
+        # only then may a bookmark be judged against it (AM-95 (6))
+        return {"ready": True, "cached": len(out), "length": len(out), "tracks": out,
+                "complete": bool((self.orders.get(uri) or {}).get("complete"))}
 
 ENGINE = Engine()
 

@@ -36,6 +36,8 @@ _SE_ETC="$_SE_ROOT/etc"
 _SE_FILE="$_SE_ETC/vibb/spotify-engine"
 _SE_ENV="/etc/vibb/soloist.env"       # the API key: KEY=VALUE, 0600, PWA-written
 SOLOISTD_PORT="${SOLOISTD_PORT:-3688}"  # the sidecar's go-librespot-dialect HTTP
+# the updater exactly as its unit runs it; tests point VIBB_SOLOIST_UPDATER at a fake
+read -r -a _SE_UPDATER <<< "${VIBB_SOLOIST_UPDATER:-env PYTHONPATH=/usr/local/lib/vibb-py VIBB_SOLOIST_BIN=/usr/local/bin/soloist VIBB_GO_API=http://127.0.0.1:$SOLOISTD_PORT /usr/bin/python3 -m vibb.soloist_update}"
 
 _se_say() { echo "    spotify engine: $*"; }
 
@@ -165,12 +167,53 @@ WantedBy=timers.target
 EOF
 }
 
+_se_migrate_from_golibrespot() {
+  # A box coming from go-librespot (AM-95 (4)(7)(9)): its precache ledger
+  # says 'queued' for albums/shows the sidecar never warmed; its audio cache
+  # (up to 20 GB) is dead weight beside Soloist's; its Spotify entries carry
+  # an explicit cache: 0 that the new default (1) never touches — flipped, so
+  # the first sweep warms AND remembers every list (the Sonos hand-off and
+  # the song picker read the remembered list).
+  local st="$_SE_ROOT/var/lib/vibb/state" lib="$_SE_ETC/vibb/library.json"
+  local cache="$_SE_ROOT/var/lib/vibb/spotify-cache"
+  if [[ -e $st/spotify-precache.json ]]; then
+    rm -f "$st/spotify-precache.json"
+    _se_say "go-librespot precache ledger dropped (one full warm pass follows)"
+  fi
+  if [[ -d $cache ]]; then
+    _se_say "go-librespot audio cache removed ($(du -sh "$cache" 2>/dev/null | cut -f1))"
+    rm -rf "$cache"
+  fi
+  if [[ -f $lib ]]; then
+    python3 - "$lib" <<'PYLIB' || _se_say "library.json: cache flip skipped (unreadable?)"
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+n = 0
+for s in d.get("sections", []):
+    for e in s.get("entries", []):
+        t = str(e.get("target", ""))
+        if ("open.spotify.com" in t or t.startswith("spotify:")) and e.get("cache") == 0:
+            e["cache"] = 1
+            n += 1
+if n:
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+    print(f"    spotify engine: {n} Spotify entr{'y' if n == 1 else 'ies'} switched cache 0 -> 1 (warm + remember)")
+PYLIB
+  fi
+}
+
 spotify_engine_apply() {
   # audio_stack_unit_env reads AUDIO_STACK; install.sh resolved it long before
   # this runs, but never depend on it (soloist implies pipewire anyway)
   AUDIO_STACK="${AUDIO_STACK:-$(audio_stack_peek)}"
   if [[ $SPOTIFY_ENGINE == soloist ]]; then
-    local _se_changed=0
+    local _se_changed=0 _se_prev=""
+    [[ -r $_SE_FILE ]] && _se_prev="$(tr -d '[:space:]' < "$_SE_FILE")"
+    [[ $_se_prev == soloist ]] || _se_migrate_from_golibrespot
     # a new sidecar file must REPLACE the running one: 'enable --now' leaves
     # a running unit alone, and the first Zero (2026-09-05 23:00) ran the
     # old sidecar for an hour after install — /cache/download answered 404
@@ -191,6 +234,13 @@ spotify_engine_apply() {
       _se_say "soloistd changed — restarted"
     fi
     systemctl enable --now vibb-soloist-update.timer
+    if [[ ! -x $_SE_ROOT/usr/local/bin/soloist ]]; then
+      # the unit's own busy gate skips the fetch while a headset is connected
+      # (AM-95 (10)) — on a box in service that is always; force it once
+      _se_say "no Soloist build installed — fetching now (12.8 MB, forced past the busy gate)"
+      "${_SE_UPDATER[@]}" --force \
+        || _se_say "fetch failed — with the headset OFF: sudo systemctl start vibb-soloist-update.service"
+    fi
     _se_say "soloistd up; go-librespot disabled (rollback: ./install.sh --librespot)"
   else
     if [[ -e $_SE_ETC/systemd/system/vibb-soloistd.service ]]; then
