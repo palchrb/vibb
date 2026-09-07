@@ -4906,11 +4906,8 @@ def _bt_recover(verb):
         for line in (r.stdout or "").splitlines():
             if line.strip():
                 log(f"bt-recovery: {line.strip()}")
-        if r.returncode == 0 and _audio.stack() == "pipewire":
-            # the recovery re-attached the radio under WirePlumber: prove
-            # the policy still holds before the next landing (AM-8)
-            threading.Thread(target=_audio_policy_run, args=("bt-recovery",),
-                             daemon=True).start()
+        # (AM-92: no self-test after a recovery any more — the probes only
+        # competed for CPU in the seconds the reconnect + resume need)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"bluetooth recovery ({verb}) failed: {e!r}")
@@ -4934,27 +4931,13 @@ def _audio_policy_run(why):
         _AUDIO_POLICY_LOCK.release()
 
 
-def _audio_policy_watch():
-    """pipewire only: wait for the server (<=60s), run the self-test if
-    it is due (never run, or PipeWire restarted = core cookie changed),
-    then watch the cookie once a minute — one pw-dump — and re-run on a
-    restart. A crash-looping daemon never probe-loops: the verdict file
-    outlives the process and 'due' is false while it is fresh."""
-    for _ in range(60):
-        if _audio.server_up():
-            break
-        _tick(1)
-    while True:
-        try:
-            d = _audio.pw_dump()
-            if not d:
-                if _audio.selftest_state().get("verdict") != "down":
-                    _audio.policy_selftest()  # records 'down' (both outputs read not-ready)
-            elif _audio.selftest_due(d):
-                _audio_policy_run("boot" if not _audio.selftest_state() else "pipewire restarted")
-        except Exception as e:
-            log(f"audio policy watch: {e!r}")
-        _tick(_audio.SELFTEST_POLL_S)
+# The policy self-test runs ON REQUEST only (POST /audio/selftest, or from a
+# shell: `cd ~/vibb/pi && sudo python3 -c 'from vibb import audio; print(audio.policy_selftest())'`).
+# It used to run at boot and on every PipeWire restart (AM-7/AM-8); under the
+# boot storm its 1 s probe waits read FAIL-SAFETY falsely, its verdict feeds
+# nothing but /status.audio_policy, and it cost ~6 s of CPU while the screen
+# came up — owner 2026-09-07, AM-92: a guard to run after an upgrade, not a
+# boot step.
 
 
 def _speaker_mac():
@@ -6091,8 +6074,6 @@ def main():
     threading.Thread(target=_spotify_supervisor, daemon=True).start()
     threading.Thread(target=_ip_watchdog, daemon=True).start()
     threading.Thread(target=_portal_server, daemon=True).start()
-    if _audio.stack() == "pipewire":
-        threading.Thread(target=_audio_policy_watch, daemon=True).start()
     # Self-heal: install.sh normally creates this, but a deleted or
     # corrupt file must produce a NEW token rather than a box where every
     # privileged endpoint is permanently unreachable. ensure() never

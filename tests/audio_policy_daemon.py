@@ -5,11 +5,11 @@ of it.
 
   1. /status carries audio_policy under pipewire (the verdict, or
      'pending' before the first run) and OMITS it under bluealsa
-  2. a successful bt.py recovery re-runs the self-test under pipewire
-     only; a failed one does not
+  2. a bt.py recovery never runs the self-test (AM-92: the probes only
+     competed for CPU during the reconnect + resume)
   3. POST /audio/selftest starts a run off the request thread (202) and
      answers 409 under bluealsa
-  4. the boot watcher thread starts only under pipewire; one run at a
+  4. no boot watcher thread (AM-92: on request only); one run at a
      time (a second trigger while one runs is dropped)
 """
 import json
@@ -66,7 +66,7 @@ assert "audio_policy" not in orch.status(), "bluealsa boxes emit nothing"
 set_stack("pipewire")
 print("1. /status.audio_policy under pipewire only OK")
 
-# 2. bt recovery re-runs it
+# 2. bt recovery never runs it (AM-92)
 
 
 class R:
@@ -78,18 +78,13 @@ daemon.subprocess.run = lambda *a, **k: R(0)
 RUNS.clear()
 assert daemon._bt_recover("ensure") is True
 time.sleep(0.5)
-assert len(RUNS) == 1, "a successful recovery re-runs the self-test"
+assert len(RUNS) == 0, "a recovery does not run the self-test (AM-92)"
 daemon.subprocess.run = lambda *a, **k: R(1)
 assert daemon._bt_recover("ensure") is False
 time.sleep(0.3)
-assert len(RUNS) == 1, "a failed recovery does not"
-set_stack("bluealsa")
-daemon.subprocess.run = lambda *a, **k: R(0)
-daemon._bt_recover("ensure")
-time.sleep(0.3)
-assert len(RUNS) == 1, "never under bluealsa"
+assert len(RUNS) == 0
 set_stack("pipewire")
-print("2. bt recovery -> self-test re-run (pipewire, success only) OK")
+print("2. bt recovery -> no self-test (AM-92) OK")
 
 # 3. the POST route (source pin + the runner's single-flight)
 src = open(daemon.__file__, encoding="utf-8").read()
@@ -106,8 +101,7 @@ assert len(RUNS) == 1, "one run at a time; the second trigger is dropped"
 print("3. POST /audio/selftest route + single-flight runner OK")
 
 # 4. the watcher thread only under pipewire
-i_main = src.index("def main():")
-assert 'if _audio.stack() == "pipewire":\n        threading.Thread(target=_audio_policy_watch' in src[i_main:]
-print("4. boot watcher thread guarded by the stack OK")
+assert "_audio_policy_watch" not in src, "no boot watcher: the self-test runs on request only (AM-92)"
+print("4. no boot watcher thread (on request only) OK")
 
 print("\nall audio_policy_daemon checks passed")
