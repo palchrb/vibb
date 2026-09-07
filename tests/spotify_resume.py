@@ -210,3 +210,9 @@ assert calls2 == [("/player/prev", None)], calls2
 print("13. prev: deep=restart track, early=previous track (mpv parity) OK")
 
 print("SPOTIFY RESUME OK — per-context bookmarks, phone can't corrupt them.")
+# the imported daemon leaves daemon threads that log at interpreter
+# shutdown; under suite load one held the stdout lock and CPython aborted
+# ("_enter_buffered_busy", suite 2026-09-07) AFTER every check had passed —
+# leave without running finalizers
+sys.stdout.flush(); sys.stderr.flush()
+os._exit(0)

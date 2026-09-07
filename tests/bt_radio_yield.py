@@ -77,9 +77,9 @@ HDR = ("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask"
        "\tMTU\tWindow\tIRTT\n")
 
 
-def wifi(settled):
+def wifi(settled, oper="up"):
     with open(os.environ["VIBB_WLAN_OPERSTATE"], "w") as f:
-        f.write("up\n")
+        f.write(oper + "\n")
     with open(os.environ["VIBB_NET_ROUTE"], "w") as f:
         f.write(HDR + ("wlan0\t00000000\t0102A8C0\t0003\t0\t0\t600"
                        "\t00000000\t0\t0\t0\n" if settled else ""))
@@ -90,6 +90,16 @@ btwatchd.WIFI_GATE_S = 10 ** 9  # this machine's uptime is 'early boot'
 wifi(settled=False)
 assert rec._radio_yield() is True
 print("1. wifi associating at boot: blind pages hold OK")
+
+# 1b. AM-93: wlan0 DOWN inside the gate (NetworkManager not started yet)
+#     -> nothing to protect, the page goes now; 'dormant' (NM working on
+#     it: scanning/associating) without a route -> hold
+wifi(settled=False, oper="down")
+assert rec._radio_yield() is False, "wlan0 down: nothing to deauth, page now"
+wifi(settled=False, oper="dormant")
+assert rec._radio_yield() is True
+wifi(settled=False)
+print("1b. wlan0 down at boot: page now; dormant/up without a route: hold OK")
 
 # 2. wifi settled (default route up) -> the gate opens
 wifi(settled=True)

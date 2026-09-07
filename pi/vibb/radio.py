@@ -142,21 +142,20 @@ def uptime():
         return float("inf")  # can't tell — never gate on it
 
 
-def wifi_settled():
-    """Is wifi past its fragile window? 'operstate up' alone flips at
-    association — BEFORE the 4-way handshake and DHCP, which is exactly
-    where the boot deauths (reason=6) live — so require a default route
-    through wlan0 too. No wlan0 at all reads settled: nothing to
-    protect."""
+def _wlan0_operstate():
+    """'up' | 'dormant' | 'down' | ... or None when there is no wlan0."""
     state_path = os.environ.get("VIBB_WLAN_OPERSTATE",
                                 "/sys/class/net/wlan0/operstate")
-    route_path = os.environ.get("VIBB_NET_ROUTE", "/proc/net/route")
     try:
         with open(state_path) as f:
-            if f.read().strip() != "up":
-                return False
+            return f.read().strip()
     except OSError:
-        return True  # no wlan0 — wifi isn't in the picture
+        return None
+
+
+def _wlan0_routed():
+    """A default route through wlan0? None when the table is unreadable."""
+    route_path = os.environ.get("VIBB_NET_ROUTE", "/proc/net/route")
     try:
         with open(route_path) as f:
             for line in f.readlines()[1:]:
@@ -166,4 +165,36 @@ def wifi_settled():
                     return True
         return False
     except OSError:
+        return None
+
+
+def wifi_assoc_in_flight():
+    """Is wlan0 in the fragile part of its setup RIGHT NOW — the interface
+    up for NetworkManager/wpa_supplicant to work on (scan, associate,
+    4-way handshake, DHCP) but no default route yet? That is where the
+    boot deauths (reason=6, field 2026-07-18) lived. 'down' means nobody
+    has touched the radio yet: nothing to protect, a page is free (AM-93:
+    NetworkManager starts ~20 s late on Trixie and 'hold until settled'
+    made BT wait for it). Fails open: no wlan0, no table -> False."""
+    st = _wlan0_operstate()
+    if st is None or st in ("down", "notpresent", "lowerlayerdown"):
+        return False
+    routed = _wlan0_routed()
+    return routed is False
+
+
+def wifi_settled():
+    """Is wifi past its fragile window? 'operstate up' alone flips at
+    association — BEFORE the 4-way handshake and DHCP, which is exactly
+    where the boot deauths (reason=6) live — so require a default route
+    through wlan0 too. No wlan0 at all reads settled: nothing to
+    protect."""
+    st = _wlan0_operstate()
+    if st is None:
+        return True  # no wlan0 — wifi isn't in the picture
+    if st != "up":
+        return False
+    routed = _wlan0_routed()
+    if routed is None:
         return True  # unreadable — fail open, don't gate forever
+    return routed

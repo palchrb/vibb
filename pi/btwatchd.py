@@ -113,10 +113,11 @@ CONNECT_TIMEOUT_S = 30
 YIELD_RETRY_S = float(os.environ.get("VIBB_RECON_YIELD_RETRY", "4"))
 YIELD_GIVEUP_S = float(os.environ.get("VIBB_RECON_YIELD_GIVEUP", "120"))
 # 45, not 15: NetworkManager doesn't even bring wlan0 up until ~27s of
-# uptime on this box, so a 15s gate expired BEFORE the association it
-# was meant to protect (field 2026-07-18 20:00: boot pages at 23s and
-# 33s landed in the assoc window). Free once wifi settles (route up);
-# an offline cabin boot delays blind pages <=45s — kicks bypass.
+# uptime on this box (~33s on Trixie), so a 15s gate expired BEFORE the
+# association it was meant to protect (field 2026-07-18 20:00: boot pages
+# at 23s and 33s landed in the assoc window). Inside the gate a page holds
+# only while wlan0 is up without a route (AM-93) — an offline cabin boot
+# (wlan0 up, scanning forever) delays blind pages <=45s; kicks bypass.
 WIFI_GATE_S = float(os.environ.get("VIBB_RECON_WIFI_GATE", "45"))
 # ~4 failed boot pages = the speaker is off; the 5s boot cadence would
 # otherwise burn ~24 pages against nothing, exactly while wifi comes up
@@ -381,7 +382,10 @@ class Reconnector:
         wifi, field 2026-07-18) or a network stream/track load is in
         flight. Bounded: a long-absent speaker stops yielding after
         YIELD_GIVEUP_S so markers can never starve reconnect."""
-        if _radio.uptime() < WIFI_GATE_S and not _radio.wifi_settled():
+        if _radio.uptime() < WIFI_GATE_S and _radio.wifi_assoc_in_flight():
+            # AM-93: hold only while wlan0 is actually being set up (up,
+            # no route yet). Before NetworkManager touches the radio there
+            # is nothing to deauth — and on Trixie it starts ~20 s late
             hold = True
         elif _radio.warming():
             # a soloistd pass is fetching (4d, AM-68): a page now is the
