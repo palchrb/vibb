@@ -98,7 +98,7 @@ print("1. resolve: env > file > default, garbage refused OK")
 
 # 2. pipewire
 root = tempfile.mkdtemp()
-for u in ("pipewire.socket", "pipewire.service", "wireplumber.service"):
+for u in ("pipewire.socket", "pipewire.service", "wireplumber.service", "mpris-proxy.service"):
     os.makedirs(os.path.join(root, "usr/lib/systemd/user"), exist_ok=True)
     open(os.path.join(root, "usr/lib/systemd/user", u), "w").close()
 r, calls = run("pipewire", root)
@@ -111,6 +111,8 @@ wp = open(os.path.join(units, "wireplumber.service")).read()
 assert not re.search(r"^RuntimeDirectory", svc, re.M), "AM-1: the socket unit owns /run/pipewire"
 assert not re.search(r"^Environment=PIPEWIRE_CONFIG_DIR", svc, re.M), "AM-21"
 assert "Nice=0" in svc and "Nice=0" in wp, "AM-4"
+for u in (svc, wp):   # AM-91: module-rt sets its own priority, no RTKit from a system unit
+    assert "LimitRTPRIO=95" in u and "LimitNICE=-11" in u, u
 assert "DirectoryMode=0750" in sock and "SocketGroup=audio" in sock
 assert "BindsTo=pipewire.service" in wp and "WantedBy=pipewire.service" in wp, "AM-2"
 assert "Requires=pipewire.service" not in wp
@@ -142,11 +144,12 @@ assert masks == ["systemctl mask --now bluealsa.service",
                  "systemctl mask --now bluealsad.service",
                  "systemctl mask --now bluealsa-aplay.service"], masks
 # Debian enables PipeWire in every user session: masked globally, only the
-# units that exist (fake /usr/lib/systemd/user has three of the six)
+# units that exist (fake /usr/lib/systemd/user has four of the seven)
 gmasks = [c for c in calls if c.startswith("systemctl --global mask")]
 assert gmasks == ["systemctl --global mask pipewire.socket",
                   "systemctl --global mask pipewire.service",
-                  "systemctl --global mask wireplumber.service"], gmasks
+                  "systemctl --global mask wireplumber.service",
+                  "systemctl --global mask mpris-proxy.service"], gmasks   # AM-91: one AVRCP player
 assert not any("remove" in c or "purge" in c for c in calls), "mask, never remove"
 enables = [c for c in calls if c.startswith("systemctl enable")]
 assert enables == ["systemctl enable --now pipewire.socket pipewire.service wireplumber.service"], enables
@@ -209,7 +212,8 @@ assert masks == ["systemctl mask wireplumber.service", "systemctl mask pipewire.
                  "systemctl mask --now bluealsa-aplay.service"], masks
 assert [c for c in calls if c.startswith("systemctl --global mask")] == [
     "systemctl --global mask pipewire.socket", "systemctl --global mask pipewire.service",
-    "systemctl --global mask wireplumber.service"], "session PipeWire stays masked under bluealsa too"
+    "systemctl --global mask wireplumber.service",
+    "systemctl --global mask mpris-proxy.service"], "session PipeWire (and mpris-proxy) stay masked under bluealsa too"
 assert calls.index(masks[2]) < calls.index("systemctl unmask bluealsa.service"), \
     "the pipewire trio is masked before bluealsa comes back"
 assert "systemctl enable --now bluealsa.service" in calls

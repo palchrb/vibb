@@ -136,6 +136,12 @@ Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
 Environment=HOME=/var/lib/vibb/pipewire
 ExecStart=/usr/bin/pipewire
 Nice=0
+# the data thread at SCHED_FIFO 88 / nice -11, set by module-rt itself (what
+# RTKit grants a desktop session; no RTKit reachable from a system unit) —
+# owner 2026-09-07, AM-91: the AM-4 escalation, taken after the boot log
+# showed both daemons at normal priority on a four-core Zero
+LimitRTPRIO=95
+LimitNICE=-11
 LimitMEMLOCK=64M
 Restart=on-failure
 RestartSec=2
@@ -163,6 +169,8 @@ Environment=HOME=/var/lib/vibb/wireplumber
 Environment=DBUS_SESSION_BUS_ADDRESS=disabled:
 ExecStart=/usr/bin/wireplumber -p $WP_PROFILE
 Nice=0
+LimitRTPRIO=95
+LimitNICE=-11
 Restart=on-failure
 RestartSec=2
 [Install]
@@ -299,8 +307,12 @@ EOF
 _as_mask_idle_units() {
   systemctl mask --now bluealsa-aplay.service >/dev/null 2>&1 || true
   local u
+  # mpris-proxy: Debian's session bridge for desktop players registers a
+  # SECOND AVRCP player on the headset whenever someone ssh-es in; the box
+  # has vibb-mpris for that (owner 2026-09-07, AM-91)
   for u in pipewire.socket pipewire.service pipewire-pulse.socket \
-           pipewire-pulse.service wireplumber.service filter-chain.service; do
+           pipewire-pulse.service wireplumber.service filter-chain.service \
+           mpris-proxy.service; do
     [[ -e $_AS_ROOT/usr/lib/systemd/user/$u ]] || continue
     systemctl --global mask "$u" >/dev/null 2>&1 || true
   done
