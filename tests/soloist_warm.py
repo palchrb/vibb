@@ -207,6 +207,8 @@ code, lst = get(base, "/context/tracks?uri=" + CTX)
 assert [x["uri"] for x in lst["tracks"]] == TRACKS, lst          # the whole list, from disk
 code, r = post(base, "/cache/download", {"uri": CTX})
 assert code == 200 and r["done"] is True and r["warmed"] == len(TRACKS), (code, r)
+# AM-97: a first discovery SEEDS the 'new' signal with the last row, nothing added
+assert h["warm_new"][CTX] == {"newest": TRACKS[-1], "added": []}, h["warm_new"]
 # the kid plays it: a fresh start through the 3-window keeps the 6-row order
 wait_state(base, "ok")
 code, r = post(base, "/player/play", {"uri": CTX})
@@ -230,6 +232,8 @@ try:
     assert [u for u, _ in FAKE.fetch_log] == ["spotify:track:t6"], FAKE.fetch_log     # only the new row cost a fetch
     logtxt = open(p.logpath).read()
     assert logtxt.count("list grew to 7 rows") == 1, logtxt[-1500:]
+    # AM-97: beyond a COMPLETE order the appended row is NEW — the badge's id
+    assert h["warm_new"][CTX] == {"newest": "spotify:track:t6", "added": ["spotify:track:t6"]}, h["warm_new"]
 finally:
     TRACKS.pop()
     FAKE.status, FAKE.context, FAKE.idx = "idle", None, 0   # the fake sat on the popped row

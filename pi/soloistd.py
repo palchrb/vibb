@@ -340,6 +340,7 @@ class Engine:
         self.warm = None                       # the running pass, or None
         self.warm_last = None                  # the last pass's summary
         self.warm_done = {}                    # uri -> result for every pass of the running thread (AM-87)
+        self.warm_new = {}                     # uri -> {newest, added}: rows the pass found appended (AM-97)
         self._warm_queue = []
         self.lock_warm = threading.Lock()
         self.z_mb = None
@@ -386,6 +387,7 @@ class Engine:
                 "pending_restart": self.pending_restart, "pairing": self.pairing,
                 "device_name": DEVICE_NAME, "warming": dict(self.warm) if self.warm else None,
                 "warm_done": dict(self.warm_done),
+                "warm_new": dict(self.warm_new),
                 "warm_last": self.warm_last, "gen": self.gen}
 
     # ----- the child -----
@@ -932,6 +934,7 @@ class Engine:
             if self._warm_thread is None or not self._warm_thread.is_alive():
                 self._warm_abort.clear()
                 self.warm_done = {}
+                self.warm_new = {}
                 self._warm_thread = threading.Thread(target=self._warm_run, daemon=True)
                 self._warm_thread.start()
         return 202, {"queued": True, "uri": uri, "queue": len(self._warm_queue)}
@@ -1197,6 +1200,12 @@ class Engine:
         if self._poweroff_imminent():
             return "poweroff"
         e = self._ledger_entry(uri)
+        # what the box knew of this list BEFORE the pass (AM-97): rows the
+        # walk finds beyond a COMPLETE order are new content — the daemon's
+        # 'new' badge; beyond an incomplete one they are mere discovery
+        prev_rec = self.orders.get(uri) or {}
+        known_before = set(prev_rec.get("tracks") or [])
+        was_complete = bool(prev_rec.get("complete"))
         if not self._warm_owned:
             self._warm_own()
         gen = self.gen
@@ -1318,6 +1327,17 @@ class Engine:
                 rec["complete"] = True
                 _save_json(_order_path(uri), rec)
             e["verified_at"] = time.time()
+            # AM-97: the 'new' signal. A list known complete before: the rows
+            # beyond it are new, the last of them is the id the badge keys on.
+            # A first (or continued) discovery seeds with the last row, which
+            # the daemon acknowledges on first sight — nothing lights up at
+            # migration. A removal never changes `newest`.
+            added = [u for u in order if u not in known_before] if was_complete else []
+            if was_complete:
+                newest = added[-1] if added else None
+            else:
+                newest = order[-1] if order else None
+            self.warm_new[uri] = {"newest": newest, "added": added}
             return "done"
         return "budget" if items >= WARM_PASS_MAX_ITEMS else "partial"
 

@@ -102,6 +102,30 @@ assert CALLS.count("ps-kick") == 1, CALLS
 assert lib._precache_due(U5) is False and lib._precache_due(U6) is True
 print("5. two due lists: both queued first, one poll loop, stamped per uri from warm_done OK")
 
+# 6. AM-97: the carousel's 'new' dot for a Spotify list — fed from warm_new:
+#    first sight seeds + acknowledges (nothing lights up at migration), a
+#    later appended row badges, playing it clears
+CALLS.clear(); DONE_AT_ONCE[0] = False
+U7, T7 = "spotify:playlist:p7", "https://open.spotify.com/playlist/p7"
+HEALTH[:] = [{"warming": {"uri": U7}},
+             {"warming": None, "warm_done": {U7: "done"},
+              "warm_new": {U7: {"newest": "spotify:track:z5", "added": []}}}]
+assert lib._warm_entries([(U7, "L7", T7)]) == {U7: True}
+assert lib.is_new(T7) is False, "first sight is acknowledged"
+HEALTH[:] = [{"warming": {"uri": U7}},
+             {"warming": None, "warm_done": {U7: "done"},
+              "warm_new": {U7: {"newest": "spotify:track:z6", "added": ["spotify:track:z6"]}}}]
+lib._precache_state()  # (state file readable)
+lib._warm_entries([(U7, "L7", T7)])
+assert lib.is_new(T7) is True, "an appended row badges the list"
+lib.acknowledge_new(T7)
+assert lib.is_new(T7) is False
+HEALTH[:] = [{"warming": {"uri": U7}},
+             {"warming": None, "warm_done": {U7: "done"}, "warm_new": {U7: {"newest": None, "added": []}}}]
+lib._warm_entries([(U7, "L7", T7)])
+assert lib.is_new(T7) is False, "a removal (no newest) never badges"
+print("6. Spotify 'new' dot: seeded silently, badged on an appended row, cleared on play OK")
+
 # 4. AM-45: the default under soloist
 assert lib._default_cache("https://open.spotify.com/playlist/x") == 1
 assert lib._default_cache("https://radio.nrk.no/podkast/x") == 0

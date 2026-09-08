@@ -409,9 +409,9 @@ def _warm_health():
         return {}
 
 
-def _warm_entry(uri, name):
+def _warm_entry(uri, name, target=None):
     """One entry — see _warm_entries."""
-    return _warm_entries([(uri, name)]).get(uri, False)
+    return _warm_entries([(uri, name, target)]).get(uri, False)
 
 
 def _warm_entries(items):
@@ -429,7 +429,8 @@ def _warm_entries(items):
     except Exception:
         pass
     pending = []
-    for uri, name in items:
+    items = [(it[0], it[1], it[2] if len(it) > 2 else None) for it in items]
+    for uri, name, _target in items:
         try:
             r = json.loads(spotify.go("/cache/download", timeout=10, body={"uri": uri}) or b"{}")
         except (OSError, ValueError) as exc:
@@ -442,7 +443,7 @@ def _warm_entries(items):
             out[uri] = True
             continue
         log(f"warm {name}: queued")
-        pending.append((uri, name))
+        pending.append((uri, name, _target))
     if not pending:
         return out
     if WARM_START:
@@ -469,8 +470,9 @@ def _warm_entries(items):
         _sync_wake.wait(WARM_POLL_S)
         _sync_wake.clear()
     done = h.get("warm_done") or {}
+    newrows = h.get("warm_new") or {}
     last = h.get("warm_last") or {}
-    for uri, name in pending:
+    for uri, name, target in pending:
         result = done.get(uri)
         if result is None and last.get("uri") == uri:
             result = last.get("result")          # an older sidecar: the last pass only
@@ -478,6 +480,16 @@ def _warm_entries(items):
             log(f"warm {name}: done")
             _precache_done(uri)
             out[uri] = True
+            # AM-97: the carousel's 'new' dot for Spotify lists — the same
+            # state the podcast sync feeds; first sight is acknowledged
+            nw = newrows.get(uri) or {}
+            if target and nw.get("newest"):
+                try:
+                    _mark_new_seen(target, nw["newest"])
+                    if nw.get("added"):
+                        log(f"warm {name}: {len(nw['added'])} new row(s) — badged")
+                except Exception as exc:
+                    log(f"warm {name}: new-badge state: {exc!r}")
         else:
             log(f"warm {name}: {result or 'no result'} — stays due")
             out[uri] = False
@@ -667,7 +679,7 @@ def _cache_sweeper():
                     if _soloist():
                         # 4d: every due list into ONE pass after the walk
                         # over the library (AM-87) — one restart pair
-                        warm_batch.append((uri, e["name"]))
+                        warm_batch.append((uri, e["name"], e["target"]))
                         continue
                     while _busy():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
