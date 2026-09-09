@@ -273,6 +273,11 @@ SYNC_STAGGER_S = int(os.environ.get("VIBB_SYNC_STAGGER", 4))
 # little is lost) the moment playback starts.
 BUSY_CHECK = None  # set by the daemon; None = never busy (CLI use)
 SYNC_SETTLE_S = float(os.environ.get("VIBB_SYNC_SETTLE", "15"))
+# AM-98: what playback interrupted gets ONE more try once the box has been
+# quiet this long — within this bound; otherwise the next sweep (6 h)
+SYNC_RETRY_QUIET_S = float(os.environ.get("VIBB_SYNC_RETRY_QUIET", "60"))
+SYNC_RETRY_MAX_S = float(os.environ.get("VIBB_SYNC_RETRY_MAX", str(30 * 60)))
+SYNC_RETRY_POLL_S = float(os.environ.get("VIBB_SYNC_RETRY_POLL", "5"))
 SYNC_BUSY_RECHECK_S = int(os.environ.get("VIBB_SYNC_BUSY_RECHECK", 30))
 
 
@@ -414,7 +419,7 @@ def _warm_entry(uri, name, target=None):
     return _warm_entries([(uri, name, target)]).get(uri, False)
 
 
-def _warm_entries(items):
+def _warm_entries(items, aborted=None):
     """POST /cache/download for EVERY due Spotify entry first, then STAY with
     the pass: one queue = one ownership of the child = one restart pair for
     all the lists of a sweep (AM-87), not one per list. While it runs: touch
@@ -422,7 +427,8 @@ def _warm_entries(items):
     turns audible (AM-67). The library's precache state is stamped ONLY for
     the uris the sidecar reports done (health.warm_done, per uri; AM-70) —
     an aborted, stalled or partial pass stays due for the next sweep.
-    Returns {uri: stamped}."""
+    Returns {uri: stamped}. `aborted` (a list) receives the (uri, name, target)
+    of every list the box's own playback interrupted (AM-98)."""
     out = {}
     try:
         _radio.wait_paging_clear()
@@ -453,20 +459,20 @@ def _warm_entries(items):
             pass
     t0 = time.monotonic()
     budget = WARM_MAX_S * len(pending)
-    aborted = False
+    aborted_by_us = False
     while True:
         _radio.touch_busy()
         _radio.touch_warming()
         h = _warm_health()
         if not h.get("warming"):
             break
-        if not aborted and (_busy() or time.monotonic() - t0 > budget):
+        if not aborted_by_us and (_busy() or time.monotonic() - t0 > budget):
             log("warm: box busy — aborting the pass")
             try:
                 spotify.go("/cache/abort", timeout=25)
             except OSError:
                 pass
-            aborted = True
+            aborted_by_us = True
         _sync_wake.wait(WARM_POLL_S)
         _sync_wake.clear()
     done = h.get("warm_done") or {}
@@ -493,6 +499,8 @@ def _warm_entries(items):
         else:
             log(f"warm {name}: {result or 'no result'} — stays due")
             out[uri] = False
+            if aborted is not None and (aborted_by_us or (result or "").startswith("aborted")):
+                aborted.append((uri, name, target))
     return out
 
 
@@ -626,6 +634,63 @@ def _new_prune(active_targets):
         _new_save(kept)
 
 
+def _quiet_for(quiet_s, max_s):
+    """True once the box has been NOT busy for quiet_s in a row; False when
+    max_s pass without such a stretch (the sweep then leaves it to its next
+    round). Polls with the wake event so a library save is not missed."""
+    t0 = time.monotonic()
+    quiet_since = None
+    while True:
+        if _busy():
+            quiet_since = None
+        else:
+            quiet_since = quiet_since or time.monotonic()
+            if time.monotonic() - quiet_since >= quiet_s:
+                return True
+        if time.monotonic() - t0 > max_s:
+            return False
+        _sync_wake.wait(SYNC_RETRY_POLL_S)
+        _sync_wake.clear()
+
+
+def _retry_interrupted(interrupted, warm_retry):
+    """AM-98: ONE more try, once the box has been quiet SYNC_RETRY_QUIET_S,
+    for what playback interrupted in this round — a half-downloaded episode
+    or an aborted warm pass used to wait for the next sweep, up to 6 h,
+    even when the kid pressed pause two minutes later. Bounded by
+    SYNC_RETRY_MAX_S; a second interruption goes to the next sweep."""
+    if not interrupted and not warm_retry:
+        return
+    if not _quiet_for(SYNC_RETRY_QUIET_S, SYNC_RETRY_MAX_S):
+        log("cache sweep: box stayed busy — what playback interrupted waits for the next sweep")
+        return
+    log(f"cache sweep: box quiet — retrying {len(interrupted)} sync(s) and "
+        f"{len(warm_retry)} Spotify list(s) playback interrupted")
+    for argv, mod, e, badge in interrupted:
+        while _busy():
+            _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+            _sync_wake.clear()
+        log(f"cache sweep: {e['name']} ({' '.join(argv)}) — retry")
+        try:
+            _sync_one(argv, mod=mod)
+        except SweepYield:
+            log(f"cache sweep yields to playback again ({e['name']} — next sweep)")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"cache sweep failed for {e['name']}: {exc!r}")
+        if badge:
+            try:
+                _mark_new_seen(e["target"], content.newest_episode_id(e["target"]))
+            except Exception:
+                pass
+        _sync_wake.wait(SYNC_STAGGER_S)
+        _sync_wake.clear()
+    if warm_retry:
+        while _busy():
+            _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+            _sync_wake.clear()
+        _warm_entries(warm_retry)
+
+
 def _cache_sweeper():
     # Sweeps run on battery too: a box that mostly lives off the charger
     # otherwise never syncs at all — no fresh episodes, no covers. The
@@ -660,6 +725,7 @@ def _cache_sweeper():
         except Exception as exc:
             log(f"cover shrink failed: {exc!r}")
         warm_batch = []   # (uri, name) of every due Spotify list under soloist (AM-87)
+        interrupted = []  # (argv, mod, entry, badge) playback cut short this round (AM-98)
         for s in lib["sections"]:
             for e in s["entries"]:
                 n = e.get("cache") or 0
@@ -711,7 +777,8 @@ def _cache_sweeper():
                         _sync_one(["art-heal", e["target"]])
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
-                            "abandoned — retried next sweep)")
+                            "abandoned — retried once the box is quiet)")
+                        interrupted.append((["art-heal", e["target"]], None, e, False))
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         log(f"cache sweep failed for {e['name']}: {exc!r}")
                     _sync_wake.wait(SYNC_STAGGER_S)
@@ -731,7 +798,8 @@ def _cache_sweeper():
                                   mod=storytel.__file__)
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
-                            "abandoned — retried next sweep)")
+                            "abandoned — retried once the box is quiet)")
+                        interrupted.append((["sync", e["target"], str(n)], storytel.__file__, e, True))
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         log(f"cache sweep failed for {e['name']}: {exc!r}")
                     try:
@@ -753,7 +821,8 @@ def _cache_sweeper():
                     _sync_one(args)
                 except SweepYield:
                     log(f"cache sweep yields to playback ({e['name']} "
-                        "abandoned — retried next sweep)")
+                        "abandoned — retried once the box is quiet)")
+                    interrupted.append((args, None, e, True))
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     log(f"cache sweep failed for {e['name']}: {exc!r}")
                 # the sync wrote the fresh listing (feed.json / catalog);
@@ -765,11 +834,13 @@ def _cache_sweeper():
                     pass
                 _sync_wake.wait(SYNC_STAGGER_S)  # breathe between entries
                 _sync_wake.clear()
+        warm_retry = []
         if warm_batch:
             while _busy():
                 _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                 _sync_wake.clear()
-            _warm_entries(warm_batch)
+            _warm_entries(warm_batch, aborted=warm_retry)
+        _retry_interrupted(interrupted, warm_retry)
         _stamp_sweep()
         try:
             _precache_prune({spotify.to_uri(e["target"])

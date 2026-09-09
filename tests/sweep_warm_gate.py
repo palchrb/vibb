@@ -73,9 +73,11 @@ URI2 = "spotify:album:a2"
 HEALTH[:] = [{"warming": {"uri": URI2}}, {"warming": {"uri": URI2}}, {"warming": {"uri": URI2}},
              {"warming": None, "warm_last": {"uri": URI2, "result": "aborted: abort"}}]
 BUSY[0] = True
-ok = lib._warm_entry(URI2, "Album 2")
+gone = []
+ok = lib._warm_entries([(URI2, "Album 2", "https://open.spotify.com/album/a2")], aborted=gone).get(URI2)
 BUSY[0] = False
 assert ok is False
+assert gone == [(URI2, "Album 2", "https://open.spotify.com/album/a2")], "AM-98: the aborted list is reported for the quiet retry"
 assert [c for c in CALLS if c[0] == "/cache/abort"] == [("/cache/abort", None)], CALLS
 assert lib._precache_due(URI2) is True, "an aborted pass stays due (AM-70)"
 print("2. audible mid-pass -> one abort, the entry stays due OK")
