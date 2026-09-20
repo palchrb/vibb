@@ -83,5 +83,33 @@ with open(lib.PRECACHE_STATE, "w") as f:
 assert lib._precache_due(PL) is True
 print("7. corrupt state file fails open OK")
 
+# 8. AM-99: a stamp is re-asked after PRECACHE_RECHECK_S — under go-librespot
+#    'done' only ever meant 'queued', so a download cut by a restart never
+#    came back for an album (once EVER) or a playlist (until edited)
+import time
+lib.spotify.snapshot = fake_snapshot
+lib._precache_done(AL)
+lib._precache_done(PL)
+assert lib._precache_due(AL) is False and lib._precache_due(PL) is False, "fresh stamps"
+lib.PRECACHE_RECHECK_S = 0.2
+time.sleep(0.3)
+assert lib._precache_due(AL) is True, "an album is re-asked once its stamp is old"
+assert lib._precache_due(PL) is True, "an unchanged playlist too, once its stamp is old"
+lib.PRECACHE_RECHECK_S = 24 * 3600
+lib._precache_done(AL)
+assert lib._precache_due(AL) is False
+print("8. an old stamp is re-asked, a fresh one is not (album + playlist) OK")
+
+# 9. a legacy stamp (bare "queued" / snapshot string, no age) reads as due
+st = lib._precache_state(); st[AL] = "queued"; lib._precache_save(st)
+assert lib._precache_due(AL) is True, "unknown age = due"
+print("9. legacy 'queued' stamps are re-asked once OK")
+
+# 10. a show gets new episodes: always due, like a playlist
+SH = "spotify:show:s1"
+lib._precache_done(SH)
+assert lib._precache_due(SH) is True
+print("10. shows are always due OK")
+
 print("SPOT PRECACHE GATE OK — polite to Spotify, immutable queues once, "
       "and the gate can only ever fail open.")

@@ -526,18 +526,43 @@ def _precache_save(state):
         pass  # advisory politeness state — never break the sweep
 
 
+# AM-99: a stamp is re-asked after this long. Under go-librespot the POST is
+# fire-and-forget, so 'done' only ever meant 'queued' — a download cut by a
+# restart or a power cut never came back for immutable content, and never
+# for a playlist until it was edited. A re-ask is cheap on both engines
+# (cached tracks are skipped; soloistd answers 'done' from its ledger).
+PRECACHE_RECHECK_S = float(os.environ.get("VIBB_PRECACHE_RECHECK", str(24 * 3600)))
+
+
+def _precache_stamp(prev):
+    """(value, stamped_at) from a state entry: the new {"v","at"} shape, or
+    a legacy bare value (snapshot id / "queued") with no known age."""
+    if isinstance(prev, dict):
+        return prev.get("v"), prev.get("at")
+    return prev, None
+
+
+def _precache_fresh(prev_at):
+    return prev_at is not None and time.time() - prev_at <= PRECACHE_RECHECK_S
+
+
 def _precache_due(uri):
     state = _precache_state()
     prev = state.get(uri)
+    prev_v, prev_at = _precache_stamp(prev)
     kind = uri.split(":")[1] if uri.count(":") >= 2 else ""
-    if kind in ("album", "track", "episode", "show"):
-        return prev is None  # immutable content: queue once EVER
+    if kind == "show":
+        return True  # new episodes arrive: like a playlist, always ask (AM-99)
+    if kind in ("album", "track", "episode"):
+        # immutable content: once, then a daily re-ask (AM-99) — an unknown
+        # age (a legacy "queued" stamp) counts as due
+        return prev is None or not _precache_fresh(prev_at)
     if kind == "playlist":
         try:
             snap = spotify.snapshot(uri)
         except Exception:
             return True  # fail open — behave like before the gate
-        if snap and prev == snap:
+        if snap and prev_v == snap and _precache_fresh(prev_at):
             return False
         _PENDING_SNAP[uri] = snap
         return True
@@ -546,7 +571,7 @@ def _precache_due(uri):
 
 def _precache_done(uri):
     state = _precache_state()
-    state[uri] = _PENDING_SNAP.pop(uri, None) or "queued"
+    state[uri] = {"v": _PENDING_SNAP.pop(uri, None) or "queued", "at": time.time()}
     _precache_save(state)
 
 
