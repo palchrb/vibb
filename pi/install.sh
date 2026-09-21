@@ -190,7 +190,7 @@ fi
 # track a kid replays is downloaded once instead of every time (bandwidth on
 # hotspots; NOT offline playback — the session and audio keys are still live).
 GO_LIBRESPOT_REPO="palchrb/go-librespot"
-GO_LIBRESPOT_VERSION="v0.2.2"  # v0.0.8 Fast skip: debounced next/prev (a
+GO_LIBRESPOT_VERSION="v0.2.4"  # v0.0.8 Fast skip: debounced next/prev (a
 # burst of N presses costs 2 audio-key requests instead of N) + a circuit
 # breaker on throttled keys (aes code 2 -> one retry + stop, never the
 # 51-track walk that kept the account rate-limited); /status gains
@@ -252,7 +252,23 @@ GO_LIBRESPOT_VERSION="v0.2.2"  # v0.0.8 Fast skip: debounced next/prev (a
 # about: bounded dealer/AP retry loops + player-close fixes (the
 # zombie-session family), skip_to_uri now finds tracks already in the
 # queue, bounded end-of-track advance, truncated-audio-key and
-# decryption-race fixes.
+# decryption-race fixes. v0.2.3: upstream realignment (37 commits) —
+# the player loop is rewritten around a loader lane (loads, prefetch,
+# context resolves and connect-state pushes run OFF the loop, bounded
+# and coalesced). Three surfaces moved and vibb follows them: (1) the
+# metadata cache is OPT-IN (`metadata.enabled`, below) — next_track
+# and GET /context/tracks (the song picker) 404 without it, and
+# `context_sweep` restores the whole-list sweep at context start;
+# (2) pending_track_uri is gone from /status — every load (a phone
+# skip's too) now reads track:null + buffering:true, which
+# spotify.loading() consumes; (3) POST /player/play answers once the
+# context is RESOLVED, the load/seek/resume land behind it, so
+# player.py polls for the landing instead of trusting the reply.
+# skip_debounce_ms default 800 -> 600 (still not pinned here). Removed
+# with no vibb caller: /connect/devices, /connect/transfer. v0.2.4:
+# pending_track is back (the load's target with metadata; its uri
+# stands in for pending_track_uri) and a FAILED load reads `stopped`
+# instead of buffering forever — what lets loading() trust buffering.
 GL_VERSION_FILE=/usr/local/bin/.go-librespot.version
 
 if [[ -x /usr/local/bin/go-librespot && $UPDATE -eq 0 \
@@ -335,6 +351,15 @@ cache:
   enabled: true
   dir: /var/lib/vibb/spotify-cache
   size_limit: 20GB
+# v0.2.3: the track metadata cache is opt-in. It is what answers
+# next_track (the screen's next-cover prewarm), pending_track (the card
+# mid-skip) and GET /context/tracks (the hold-Y song picker) — 404
+# without it. context_sweep = fetch the whole list's metadata when a
+# context starts (the v0.1.0 behaviour), so the picker opens full and
+# the first skip already knows its cover.
+metadata:
+  enabled: true
+  context_sweep: true
 credentials:
   type: zeroconf
   zeroconf:
@@ -360,6 +385,18 @@ cache:
   size_limit: 20GB
 EOF
   echo "    config: enabled the audio cache (20GB, /var/lib/vibb/spotify-cache)"
+  GO_RESTART_NEEDED=1
+fi
+# Metadata cache (opt-in since fork v0.2.3) — see the config template above.
+if [[ -f "$CONF_DIR/config.yml" ]] && ! grep -q '^metadata:' "$CONF_DIR/config.yml"; then
+  cat >> "$CONF_DIR/config.yml" <<'EOF'
+# v0.2.3: opt-in metadata cache — next_track, pending_track and the
+# song picker's GET /context/tracks need it (404 without)
+metadata:
+  enabled: true
+  context_sweep: true
+EOF
+  echo "    config: enabled the metadata cache (song picker, next-cover prewarm)"
   GO_RESTART_NEEDED=1
 fi
 # The cache dir must be writable by the service user (go-librespot runs

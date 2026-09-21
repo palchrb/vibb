@@ -231,6 +231,56 @@ def accept_spot_bookmark(bm, uri, exact=False):
 
 # first /player/play timeout: see the retry comment in play_spotify
 PLAY_TIMEOUT_S = float(os.environ.get("VIBB_SPOT_PLAY_TIMEOUT", "8"))
+# how long an ACCEPTED play may take to land before it counts as failed
+# (a cold fetch on the cabin hotspot is seconds; a dead one says
+# `stopped` long before this), and the shorter grace after a request
+# the client gave up on (the old 3 x 2 s "did it land anyway" loop)
+PLAY_LAND_S = float(os.environ.get("VIBB_SPOT_PLAY_LAND", "8"))
+PLAY_LAND_TIMEOUT_S = float(os.environ.get("VIBB_SPOT_PLAY_LAND_TIMEOUT", "6"))
+PLAY_LAND_POLL_S = 0.5
+
+
+def _play_landed(want, pre_uri, budget_s):
+    """Poll /status until the play LANDED: a track with the load over
+    (`buffering` off) — the bookmark's own uri when resuming, otherwise
+    any track that is not simply the one that was already loaded
+    (unless a load was seen in between, or it stands at the top: a
+    same-context replay lands on the same uri, from 0:00). False when
+    the fork says `stopped` on
+    two consecutive reads (v0.2.4: a failed load reads stopped — one
+    read is not trusted, the very first status after the reply may
+    still be between the resolve and the load's bookkeeping) or the
+    budget runs out. An unreachable api (busy chewing) answers {} from
+    spotify.status and is waited out, not counted."""
+    deadline = time.monotonic() + budget_s
+    seen_loading = False
+    stopped_reads = 0
+    while True:
+        try:
+            st = spotify.status(timeout=2)
+        except OSError:
+            st = None
+        if st:
+            track = st.get("track") or {}
+            if track and not st.get("buffering"):
+                uri = track.get("uri")
+                if want:
+                    if uri == want:
+                        return True
+                elif uri != pre_uri or seen_loading \
+                        or (track.get("position") or 0) < 2000:
+                    return True
+            if st.get("buffering") or not track:
+                seen_loading = True
+            if st.get("stopped") and not st.get("buffering"):
+                stopped_reads += 1
+                if stopped_reads >= 2:
+                    return False
+            else:
+                stopped_reads = 0
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(PLAY_LAND_POLL_S)
 
 
 def play_spotify(target, fresh=False, exact=False, start_uri=None,
@@ -307,46 +357,52 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
     # deadline exceeded' in go-librespot's log) — retry instead of dying.
     # 8s, not 15: when the server has genuinely failed the retry lands on
     # a WARM context in ~1s (field 2026-07-18 20:04: 15s wait, then a 1s
-    # retry), so failing fast wins. But an aborted request usually KEEPS
-    # executing inside go-librespot — so before re-POSTing (which would
-    # reload the whole context behind it), check whether it landed.
+    # retry), so failing fast wins. Since fork v0.2.3 the reply says less
+    # than it did: /player/play answers once the context is RESOLVED,
+    # and the track load, the bookmark seek and the resume land BEHIND
+    # it (v0.2.2 blocked until all of it had) — so a 200 proves nothing
+    # audible yet. Every attempt therefore ends in the same landing poll
+    # (_play_landed), which also answers the old question for a request
+    # the client gave up on: it usually KEEPS executing server-side, and
+    # re-POSTing over a live one used to reload the whole context behind
+    # it. The v0.2.3 loader drops a superseded load cleanly, so a retry
+    # over a genuinely dead attempt is safe. A 409 means a NEWER command
+    # (a second tap, the phone) owns playback: nothing to retry.
     pre_uri = None
     try:
         pre_uri = (spotify.status(timeout=2).get("track") or {}).get("uri")
     except OSError:
         pass
+    want = bm["uri"] if bm else None
     last_err = None
     for attempt in range(3):
         try:
             spotify.go("/player/play", timeout=PLAY_TIMEOUT_S, body=body)
             last_err = None
-            break
         except OSError as e:
+            if getattr(e, "code", None) == 409:
+                log("play superseded by a newer command — leaving it be")
+                last_err = None
+                break
             last_err = e
-            for _ in range(3):  # did the timed-out request land anyway?
-                try:
-                    tr = (spotify.status(timeout=2).get("track")
-                          or {}).get("uri")
-                except OSError:
-                    time.sleep(2)  # api busy = still chewing on it
-                    continue
-                if tr and (tr == bm["uri"] if bm else tr != pre_uri):
-                    last_err = None
-                    log(f"play attempt {attempt + 1} timed out but "
-                        "landed — continuing")
-                break
-            if last_err is None:
-                break
-            log(f"play attempt {attempt + 1} failed ({e}) — retrying in 1s")
-            time.sleep(1)
+        if _play_landed(want, pre_uri, PLAY_LAND_S if last_err is None
+                        else PLAY_LAND_TIMEOUT_S):
+            if last_err is not None:
+                log(f"play attempt {attempt + 1} timed out but "
+                    "landed — continuing")
+            last_err = None
+            break
+        if last_err is None:
+            last_err = RuntimeError("accepted, but nothing landed")
+        log(f"play attempt {attempt + 1} failed ({last_err}) — retrying in 1s")
+        time.sleep(1)
     if last_err is not None:
-        log(f"go-librespot API unreachable ({last_err}) — check: journalctl -u go-librespot")
+        log(f"go-librespot could not start playback ({last_err}) — check: journalctl -u go-librespot")
         sys.exit(1)
     log(f"spotify: playing {uri}"
         + (f" (resuming {bm['uri']} at {bm['position'] // 1000}s)" if bm else ""))
     _apply_box_volume()
 
-    time.sleep(2)
     track = spotify.status().get("track") or {}
     if track.get("name"):
         artists = ", ".join(track.get("artist_names") or [])

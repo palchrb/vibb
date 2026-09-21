@@ -219,6 +219,25 @@ def playing(st=None):
     return bool(st.get("track")) and not st.get("paused") and not st.get("stopped")
 
 
+def loading(st):
+    """True while go-librespot is between tracks: a load is in flight
+    (the debounce hold of a skip burst, a cold fetch, a context resolve)
+    and /status answers trackless for it. The session is very much
+    alive then — a control belongs to it, and the screen card holds.
+
+    v0.0.8-v0.2.2 said so with pending_track_uri (the hold only; the
+    fetch phase read plain trackless). Since v0.2.3 the fork nils the
+    track for the WHOLE load and reports `buffering` instead; v0.2.4
+    names the target again as pending_track. All three are read, so
+    an older binary (a rollback) keeps its old answer. `stopped` wins:
+    since v0.2.4 a load that FAILED reads stopped, never buffering
+    forever, so this never trusts a dead session."""
+    if not st or st.get("stopped"):
+        return False
+    return bool(st.get("buffering") or st.get("pending_track")
+                or st.get("pending_track_uri"))
+
+
 # --- resume bookmarks ------------------------------------------------------------
 # Spotify's cloud only remembers positions for its own clients, so vibbd
 # bookkeeps track+position while the box plays. One file PER CONTEXT: with
@@ -331,7 +350,8 @@ def context_tracks(uri, timeout=5, settle_s=None):
     as it did instead of polling out the whole budget.
 
     Raises OSError when unreachable; HTTPError 400 = not a listable
-    uri, 404 = a pre-v0.1.2 fork."""
+    uri, 404 = a pre-v0.1.2 fork or (v0.2.3+) a config.yml without
+    `metadata.enabled: true` — install.sh writes it."""
     url = API + "/context/tracks?uri=" + urllib.parse.quote(uri, safe="")
     deadline = time.monotonic() + (CONTEXT_SETTLE_S if settle_s is None
                                    else settle_s)

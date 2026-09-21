@@ -2647,12 +2647,15 @@ class Orchestrator:
         # "succeeds" silently and the button feels dead. Fall through to
         # rule 4 instead: replay the target, which resumes exactly.
         if self.source == "spotify" and st is not None:
-            # v0.0.8: pending_track_uri = a debounced skip is mid-settle;
-            # the session may read trackless for that beat but it is very
+            # A LOADING session reads trackless for a beat but is very
             # much alive — treat it as live, never as empty (field
             # 2026-07-23 22:16: a mid-burst 'empty' read replayed the
-            # whole playlist)
-            if ((st.get("track") or {}) or st.get("pending_track_uri")) \
+            # whole playlist). v0.0.8 said so with pending_track_uri
+            # (the debounce hold only); since v0.2.3 the fork nils the
+            # track for the whole load and says `buffering` instead —
+            # spotify.loading() reads both. A load that FAILS reads
+            # `stopped` since v0.2.4, so this never trusts a dead one.
+            if (st.get("track") or _spotify.loading(st)) \
                     and not st.get("stopped"):
                 if not self._spot_control(action):
                     return {"routed": None, "busy": True}
@@ -2679,8 +2682,8 @@ class Orchestrator:
                 except OSError:
                     log(f"{action}: session state unclear — dropped")
                     return {"routed": None, "busy": True}
-                if ((st2.get("track") or {}) or st2.get(
-                        "pending_track_uri")) and not st2.get("stopped"):
+                if (st2.get("track") or _spotify.loading(st2)) \
+                        and not st2.get("stopped"):
                     if not self._spot_control(action):
                         return {"routed": None, "busy": True}
                     log(f"{action} -> spotify (loaded during recheck)")
@@ -2903,16 +2906,18 @@ class Orchestrator:
             # (first-listen playlist, api blocked 8-15s) outlived it and
             # the card fell to 'Nothing playing' mid-skip (field
             # 2026-07-19). A fresh BUSY marker, a recent timed-out
-            # control, or a v0.0.8 pending skip proves a load is in
-            # flight: keep the card for the full load-hold window. The
+            # control, or the fork's own loading signal proves a load is
+            # in flight: keep the card for the full load-hold window. The
             # trackless answer need not be EMPTY: mid-settle during a
-            # debounced burst the api answers with pending_track_uri and
-            # no track, and that flashed 'Nothing playing' on the screen
-            # (field 2026-07-23 22:16). A trackless answer WITHOUT any
-            # in-flight signal keeps the old behavior: only a fully
-            # empty response gets the short hold; a deliberate stop
-            # shows immediately.
-            in_flight = bool(st.get("pending_track_uri")) or _radio.busy() \
+            # debounced burst the api answers with no track, and that
+            # flashed 'Nothing playing' on the screen (field 2026-07-23
+            # 22:16). v0.0.8 flagged the hold with pending_track_uri;
+            # since v0.2.3 every load — a PHONE skip's too, which no
+            # BUSY marker covers — reads `buffering` (spotify.loading()).
+            # A trackless answer WITHOUT any in-flight signal keeps the
+            # old behavior: only a fully empty response gets the short
+            # hold; a deliberate stop shows immediately.
+            in_flight = _spotify.loading(st) or _radio.busy() \
                 or (time.monotonic() - self._spot_cmd_timeout_at
                     < SPOT_TIMEOUT_HOLD_S)
             if not st or in_flight:
@@ -2923,15 +2928,17 @@ class Orchestrator:
                     st = dict(cached)  # a load is in flight — hold the card
                     # v0.1.0: the fresh answer's pending/next metadata is
                     # newer than the cached card — carry it over
+                    # (`buffering` too: loading() must still read it)
                     for k in ("pending_track_uri", "pending_track",
-                              "next_track"):
+                              "next_track", "buffering"):
                         if fresh.get(k):
                             st[k] = fresh[k]
         track = st.get("track") or {}
         sp_playing = spotify_playing(st)
         # v0.1.0: the fork's metadata cache (whole-playlist sweep at context
         # load) describes the debounced skip target and the upcoming track
-        # before any stream is loaded
+        # before any stream is loaded. v0.2.4 reports the target only as
+        # pending_track (uri inside); pending_track_uri is derived from it.
         pend_t = st.get("pending_track") or {}
         next_t = st.get("next_track") or {}
         out["spotify"] = {"playing": sp_playing,
@@ -2945,7 +2952,8 @@ class Orchestrator:
                           # v0.0.8: the not-yet-settled skip target while a
                           # debounced burst is in flight (None otherwise)
                           "pending_track_uri":
-                              st.get("pending_track_uri") or None,
+                              st.get("pending_track_uri")
+                              or pend_t.get("uri") or None,
                           # v0.1.0: upcoming track's cover — the UI prewarms
                           # its art cache so the NEXT skip shows art instantly
                           "next_artwork":

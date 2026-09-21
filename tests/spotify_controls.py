@@ -150,6 +150,34 @@ orch._spot_cmd_timeout_at = -1e9
 daemon.spotify_command = daemon.spotify_skip = lambda a: CMDS.append(a)
 print("2b-v. trackless-with-pending session: treated as live, no replay OK")
 
+# 2b-vi. fork v0.2.3+: pending_track_uri is gone — EVERY load (the
+# debounce hold, a cold fetch, a phone's skip) reads track:null +
+# buffering:true. Same rule: alive, never empty-replay. And since v0.2.4
+# a FAILED load reads `stopped` (never buffering forever), so playpause
+# may trust buffering too — while `stopped` still wins over a stale
+# buffering flag: that session is dead and rule 4 must replay.
+SPAWNED.clear()
+orch._spot_cmd_timeout_at = -1e9
+daemon.spotify_command = daemon.spotify_skip = _cmd_refused
+daemon.go_status = lambda **k: {"buffering": True, "stopped": False,
+                                "paused": False}
+skip("next")
+assert SPAWNED == [], \
+    f"a buffering session is loading, not empty — never replay: {SPAWNED}"
+CMDS.clear()
+daemon.spotify_command = daemon.spotify_skip = lambda a: CMDS.append(a)
+r = orch.command("playpause")
+assert r.get("routed") == "spotify" and CMDS == ["playpause"], (r, CMDS)
+assert SPAWNED == [], f"playpause on a loading session forwards: {SPAWNED}"
+daemon.go_status = lambda **k: {"buffering": True, "stopped": True}
+CMDS.clear()
+r = orch.command("playpause")
+assert SPAWNED == [orch.target] and CMDS == [], \
+    f"stopped wins over buffering: a dead session replays: {SPAWNED, CMDS}"
+SPAWNED.clear()
+orch._spot_cmd_timeout_at = -1e9
+print("2b-vi. buffering session: live for next AND playpause; stopped wins OK")
+
 # 2c. a finished mpv queue replays on next too (go-librespot state is
 # irrelevant for a podcast box — even unreachable must not block it)
 SPAWNED.clear()

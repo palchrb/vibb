@@ -131,7 +131,11 @@ BODY = {}
 bookmark_calls = []
 player.radio.touch_busy = lambda: None
 player.radio.wait_paging_clear = lambda: None
-player.spotify.status = lambda timeout=5: {"username": "u", "track": {}}
+# the fork answers /player/play once the context is resolved (v0.2.3);
+# the pick is then the track that lands
+PLAYED = {"track": {}}
+player.spotify.status = lambda timeout=5: {"username": "u",
+                                           "track": PLAYED["track"]}
 player.spotify.read_bookmark = \
     lambda uri: bookmark_calls.append(("read", uri))
 player.spotify.clear_bookmark = \
@@ -141,6 +145,7 @@ player.spotify.clear_bookmark = \
 def _go(path, timeout=15, body=None):
     if path == "/player/play":
         BODY.update(body)
+        PLAYED["track"] = {"uri": body["skip_to_uri"], "position": 0}
     return b"{}"
 
 
