@@ -360,7 +360,7 @@ def spotify_cache_dir():
     no Spotify cache size at all on the soloist box)."""
     if os.environ.get("VIBB_GO_UNIT", "go-librespot") == "vibb-soloistd":
         return os.environ.get("VIBB_SOLOIST_CACHE_DIR", "/var/cache/vibb-soloist")
-    return "/var/lib/vibb/spotify-cache"
+    return os.environ.get("VIBB_GO_CACHE_DIR", "/var/lib/vibb/spotify-cache")
 
 
 def _dir_size(path):

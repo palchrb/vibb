@@ -262,6 +262,55 @@ def _sync_args_for(target, n):
 
 
 SWEEP_STAMP = os.path.join(STATE_DIR, "last-sweep.json")
+
+# A sweep in progress holds the idle auto-off (owner 2026-09-21: a batch
+# of new Storytel books must finish, on the charger or on battery above
+# a floor, whatever engine is fetching). The daemon publishes
+# sweeping() in /status; idle.py holds on it, bounded and battery-gated
+# there. Three sources, one answer: this round (our own sync children,
+# the soloist warm batch, the retry pass), and — go-librespot only —
+# the download the fork runs in the background AFTER /cache/download
+# returned, visible only as its cache dir being written.
+_SWEEP = {"active": False, "since": 0.0}
+GO_CACHE_QUIET_S = float(os.environ.get("VIBB_GO_CACHE_QUIET", 120))
+_GO_CACHE = {"at": 0.0, "val": False}
+
+
+def _go_cache_busy():
+    """go-librespot is writing its audio cache: a `.tmp` file (one per
+    track in flight, renamed into place when done) or a shard directory
+    touched within GO_CACHE_QUIET_S (the fork paces tracks 1.5-2.5 s
+    apart, so a poll can land between two files). Layout is
+    <dir>/audio/<2 hex>/<file> — ~256 shard stats, cached 30 s; never
+    walks the files. False under soloist (its pass is reported by the
+    sidecar) and when the dir is missing."""
+    if _soloist():
+        return False
+    now = time.monotonic()
+    if now - _GO_CACHE["at"] < 30.0:
+        return _GO_CACHE["val"]
+    _GO_CACHE["at"] = now
+    busy = False
+    try:
+        from vibb import sysinfo
+        root = os.path.join(sysinfo.spotify_cache_dir(), "audio")
+        with os.scandir(root) as shards:
+            for shard in shards:
+                if not shard.is_dir():
+                    continue
+                if time.time() - shard.stat().st_mtime > GO_CACHE_QUIET_S:
+                    continue
+                busy = True   # written moments ago
+                break
+    except OSError:
+        busy = False
+    _GO_CACHE["val"] = busy
+    return busy
+
+
+def sweeping():
+    """A cache sweep is fetching right now, on any engine — see _SWEEP."""
+    return bool(_SWEEP["active"]) or _go_cache_busy()
 SYNC_STAGGER_S = int(os.environ.get("VIBB_SYNC_STAGGER", 4))
 # The sweep must NEVER disturb active listening: its downloads share the
 # single 2.4GHz radio with the Spotify stream AND the A2DP link, and a
@@ -732,6 +781,7 @@ def _cache_sweeper():
         while _busy():  # active listening owns the radio — hold the sweep
             _sync_wake.wait(SYNC_BUSY_RECHECK_S)
             _sync_wake.clear()
+        _SWEEP["active"], _SWEEP["since"] = True, time.monotonic()
         try:
             # First, so new playlists get covers in this very sweep.
             sync_profile_sections()
@@ -867,6 +917,7 @@ def _cache_sweeper():
             _warm_entries(warm_batch, aborted=warm_retry)
         _retry_interrupted(interrupted, warm_retry)
         _stamp_sweep()
+        _SWEEP["active"] = False
         try:
             _precache_prune({spotify.to_uri(e["target"])
                              for s in lib["sections"] for e in s["entries"]

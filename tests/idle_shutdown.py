@@ -185,16 +185,48 @@ assert not any("soloist-update" in c for c in CALLS2), "no unit (go-librespot bo
 print("9. updater slot: after the backup, only when its unit exists, a hang never blocks poweroff OK")
 
 # 10. a soloistd pass (4d, AM-69): /status.warming holds auto-off like ssh,
-#     with a HARD release at WARM_HOLD_MAX_S
+#     with a HARD release at SWEEP_HOLD_MAX_S (an older daemon reports only
+#     `warming`; the AM-101 daemon folds it into `sweeping`)
 import types as _types  # noqa: E402
 PLAYING[0] = False; SSH[0] = False; CALLS.clear()
 WARM = [True]
 idle.boxapi = _types.SimpleNamespace(get=lambda path, timeout=5: {"warming": WARM[0]})
+_real_gate = idle.battery_allows_hold
+idle.battery_allows_hold = lambda: True
 set_limit(2)
 assert idle._cycle(999999) == 0 and CALLS == [], "a pass holds the box awake"
-idle._warm["since"] = idle.time.monotonic() - idle.WARM_HOLD_MAX_S - 1
+idle._sweep["since"] = idle.time.monotonic() - idle.SWEEP_HOLD_MAX_S - 1
 assert idle._cycle(0) == idle.CHECK_S, "past the hard release the hold is gone"
 WARM[0] = False
-assert idle._warm["since"] is None or idle._cycle(0) == idle.CHECK_S
+assert idle._sweep["since"] is None or idle._cycle(0) == idle.CHECK_S
 print("10. warming holds auto-off, hard release at the cap OK")
+
+# 11. AM-101: ANY engine's sweep (/status.sweeping — storytel/podcast
+#     syncs, go-librespot's background pre-cache, the soloist pass) holds
+#     auto-off — on the charger, or on battery above SWEEP_HOLD_MIN_PCT;
+#     below the floor on battery the box powers off as before, and a box
+#     without a PiSugar (None everywhere) is mains: hold.
+SWEEP = [True]
+idle.boxapi = _types.SimpleNamespace(
+    get=lambda path, timeout=5: {"sweeping": SWEEP[0], "warming": False})
+PISUGAR = {"battery_power_plugged": "false", "battery": "55.0"}
+idle.battery_allows_hold = _real_gate
+import vibb.sysinfo as _sysinfo  # noqa: E402
+_sysinfo.pisugar_get = lambda prop: PISUGAR.get(prop)
+idle._sweep["since"] = None
+assert idle._cycle(999999) == 0 and CALLS == [], "battery 55%: sweep holds"
+PISUGAR["battery"] = "15.0"
+assert idle._cycle(0) == idle.CHECK_S and idle._sweep["since"] is None, \
+    "battery 15% unplugged: no hold — the countdown runs"
+PISUGAR["battery_power_plugged"] = "true"
+assert idle._cycle(999999) == 0, "15% but on the charger: hold"
+PISUGAR.clear()
+assert idle._cycle(999999) == 0, "no PiSugar (None): mains — hold"
+idle._sweep["since"] = idle.time.monotonic() - idle.SWEEP_HOLD_MAX_S - 1
+assert idle._cycle(0) == idle.CHECK_S, "the 2 h cap releases a wedged sweep"
+SWEEP[0] = False
+idle._sweep["since"] = None
+assert idle._cycle(0) == idle.CHECK_S, "sweep over: countdown runs"
+assert idle.SWEEP_HOLD_MAX_S == 7200 and idle.SWEEP_HOLD_MIN_PCT == 20
+print("11. any-engine sweep holds auto-off, battery-gated at 20%, capped at 2 h OK")
 

@@ -2765,7 +2765,9 @@ class Orchestrator:
                "spotify_state": _engine_state(),
                "session": _SESSION["verdict"] or "pending",
                "output": current_output()["output"],
-               "warming": bool(_warming())}   # idle.py holds, backup waits (AM-69)
+               "warming": bool(_warming()),   # backup waits (AM-69)
+               # any engine's sweep (AM-101): idle.py holds auto-off on it
+               "sweeping": bool(_warming()) or _library.sweeping()}
         if source == "sonos":
             # Same keys, same units as the mpv card — that identity IS
             # the "only difference is where the sound comes out" promise.
