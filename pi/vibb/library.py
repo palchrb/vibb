@@ -362,6 +362,38 @@ def _stamp_sweep():
         pass
 
 
+def _did_work(f):
+    """Did the sync child download anything? Its own output says so — a
+    'cached …'/'failed …' line (content.py), 'downloading …' (storytel.py)
+    or cached episode images. A no-change check leaves none of these."""
+    try:
+        f.seek(0)
+        text = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return True   # unreadable: assume work, keep the old pacing
+    return bool(re.search(r"^(cached|failed) |: downloading |cached \d+ episode image",
+                          text, re.M))
+
+
+def _log_outcome(name, worked, t0):
+    """One journal line per entry with what the sync DID — the child's own
+    'nothing new' went to stderr, surfaced only on failure, so a sweep that
+    found nothing looked identical to one that downloaded (field 2026-10-20)."""
+    log(f"cache sweep: {name} — {'downloaded' if worked else 'nothing new'} "
+        f"({time.monotonic() - t0:.1f}s)")
+
+
+def _breathe(worked):
+    """The pause between entries exists for the radio and the SD card
+    after a DOWNLOAD; a child that only re-checked a catalog (one request,
+    nothing written) earned none. With ~30 entries and a 4 s pause, an
+    all-quiet sweep spent ~2 of its 3.5 min breathing (field 2026-10-20);
+    now it moves straight on."""
+    if worked:
+        _sync_wake.wait(SYNC_STAGGER_S)
+        _sync_wake.clear()
+
+
 def _sync_one(args, mod=None):
     """Run one content.py sync, kept off the audio's back: nice-19, and
     pinned to a single core (taskset) so the ffmpeg transcode can't take
@@ -390,7 +422,10 @@ def _sync_one(args, mod=None):
         except OSError:
             return ""
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+    # stdout too (content.py prints 'cached <slug>/<id>' per download,
+    # storytel.py logs 'downloading <id>'): the caller learns whether the
+    # child did any WORK, and breathes only then (AM-103)
+    proc = subprocess.Popen(cmd, stdout=errf,
                             stderr=errf,
                             preexec_fn=lambda: os.nice(19))
     deadline = time.monotonic() + 3600
@@ -401,8 +436,9 @@ def _sync_one(args, mod=None):
                 t = tail()
                 log(f"sync exited {proc.returncode} ({' '.join(args[:2])})"
                     + (f": {t}" if t else ""))
+            worked = _did_work(errf)
             errf.close()
-            return
+            return worked
         except subprocess.TimeoutExpired:
             pass
         if _busy() or time.monotonic() > deadline:
@@ -848,16 +884,16 @@ def _cache_sweeper():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                         _sync_wake.clear()
                     log(f"cache sweep: {e['name']} (art-heal)")
+                    worked = True
                     try:
-                        _sync_one(["art-heal", e["target"]])
+                        worked = _sync_one(["art-heal", e["target"]])
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
                             "abandoned — retried once the box is quiet)")
                         interrupted.append((["art-heal", e["target"]], None, e, False))
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         log(f"cache sweep failed for {e['name']}: {exc!r}")
-                    _sync_wake.wait(SYNC_STAGGER_S)
-                    _sync_wake.clear()
+                    _breathe(worked)
                     continue
                 if n != 0 and storytel.is_storytel(e["target"]):
                     # storytel downloads run storytel.py, not content.py:
@@ -868,9 +904,11 @@ def _cache_sweeper():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                         _sync_wake.clear()
                     log(f"cache sweep: {e['name']} (storytel {n})")
+                    worked, t0 = True, time.monotonic()
                     try:
-                        _sync_one(["sync", e["target"], str(n)],
-                                  mod=storytel.__file__)
+                        worked = _sync_one(["sync", e["target"], str(n)],
+                                           mod=storytel.__file__)
+                        _log_outcome(e["name"], worked, t0)
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
                             "abandoned — retried once the box is quiet)")
@@ -882,8 +920,7 @@ def _cache_sweeper():
                                        content.newest_episode_id(e["target"]))
                     except Exception:
                         pass
-                    _sync_wake.wait(SYNC_STAGGER_S)
-                    _sync_wake.clear()
+                    _breathe(worked)
                     continue
                 args = _sync_args_for(e["target"], n) if n != 0 else None
                 if not args:
@@ -892,8 +929,10 @@ def _cache_sweeper():
                     _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                     _sync_wake.clear()
                 log(f"cache sweep: {e['name']} ({' '.join(args)})")
+                worked, t0 = True, time.monotonic()
                 try:
-                    _sync_one(args)
+                    worked = _sync_one(args)
+                    _log_outcome(e["name"], worked, t0)
                 except SweepYield:
                     log(f"cache sweep yields to playback ({e['name']} "
                         "abandoned — retried once the box is quiet)")
@@ -907,8 +946,7 @@ def _cache_sweeper():
                                    content.newest_episode_id(e["target"]))
                 except Exception:
                     pass
-                _sync_wake.wait(SYNC_STAGGER_S)  # breathe between entries
-                _sync_wake.clear()
+                _breathe(worked)  # between entries, after a download only
         warm_retry = []
         if warm_batch:
             while _busy():

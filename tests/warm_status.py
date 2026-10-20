@@ -54,6 +54,6 @@ assert daemon._warming() is None
 assert daemon._warm_abort_wait("play") is False and POSTS == ["/cache/abort"], "no pass: nothing posted"
 # the hook is wired where BUSY_CHECK is (at daemon start, not import): pin the source
 src = open(daemon.__file__, encoding="utf-8").read()
-i = src.index("_library.BUSY_CHECK = _audible_now")
+i = src.index("_library.BUSY_CHECK = _sweep_busy_now")
 assert "_library.WARM_START = _PS_KICK.set" in src[i:i + 300], "a pass starts = wifi power save off"
 print("warm status: deadline, abort+wait, PS kick hook OK")

@@ -6087,12 +6087,36 @@ def _audible_now():
         return _go_unit_active()
 
 
+def _sweep_busy_now():
+    """The cache sweeper's busy-gate (AM-103, owner 2026-10-20): its
+    downloads must never share a SCARCE link with playback — and only two
+    links are scarce. The box's own 2.4 GHz radio while audio streams
+    over it (_streaming_now: Spotify, mpv on a remote url, a start or
+    skip in flight, or an api too blocked to tell); and the BT coex path
+    while the output is a BT speaker (A2DP under wifi load is the BT
+    firmware-crash class). Audible but neither — a synced podcast or a
+    Storytel book on the HAT, a Sonos session (the SPEAKER streams, the
+    box only polls SOAP) — leaves the radio free, so the sweep carries
+    on and a half-downloaded book is no longer killed by a bedtime story
+    from the cache. _audible_now gated this before and paused for every
+    kind of sound; the soloist warm pass had the narrower rule all along
+    (not(audible and streaming)) — this aligns the two."""
+    streaming = _streaming_now()
+    if streaming is None or streaming:
+        return True   # streaming, or cannot tell (api blocked mid-load)
+    if ORCH.source == "sonos":
+        return False  # the speaker streams; the box's radio is idle
+    if not _audible_now():
+        return False
+    return current_output()["output"] == "bt"
+
+
 def main():
     try:
         signal.signal(signal.SIGTERM, _on_term)
     except ValueError:
         pass  # not the main thread (tests run main() in a thread)
-    _library.BUSY_CHECK = _audible_now  # the sweep yields to live audio
+    _library.BUSY_CHECK = _sweep_busy_now  # the sweep yields to audio that NEEDS the radio (AM-103)
     _library.WARM_START = _PS_KICK.set   # a pass starts: wifi power save off under the CDN burst (AM-67)
     threading.Thread(target=_wifi_ps_governor, daemon=True).start()
     # Settle the session verdict in its own thread. It used to hang off
