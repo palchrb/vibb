@@ -112,9 +112,11 @@ print("W1. pass: null sink, frozen stopped, every track whole, autoplay stop, re
 FAKE.status, FAKE.context = "idle", None
 FAKE.send(FAKE.state()); time.sleep(0.3)
 code, lst = get(base, "/context/tracks?uri=" + CTX)
-assert lst["stale"] is True and lst["cached"] == lst["length"] == len(TRACKS), lst
+# AM-102: the pass proved this order complete and verified it just now, so
+# the listing is NOT stale — the Sonos hand-off may index into it
+assert lst["stale"] is False and lst["cached"] == lst["length"] == len(TRACKS), lst
 assert [t["uri"] for t in lst["tracks"]] == TRACKS and lst["tracks"][0]["track"]["name"] == "T0"
-print("W8. listing from disk for a non-live context: stale, counted, ordered OK")
+print("W8. listing from disk for a non-live context: fresh (complete+verified), counted, ordered OK")
 p.terminate(); p.wait(5)
 
 # ---- W2: everything already in the cache: dwell 0, nothing written --------------

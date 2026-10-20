@@ -211,3 +211,82 @@ orch._sonos_stepping = True
 orch._sonos_step_worker()          # ...and the machinery still works
 assert CALLS == [1, 2], f"the failed step is dropped, not fatal: {CALLS}"
 print("7. step coalescer survives SidecarDown, buttons never brick OK")
+
+# 8. AM-102: under soloist the hand-off listing is a REMEMBERED one; when
+#    the sidecar says it is not stale (complete + verified) and the speaker's
+#    queue_len matches, the map is trusted -> next/prev are /queue_play jumps
+del orch._sonos_play_entry     # case 7's fake shadowed the real method
+FAKE["log"].clear()
+LISTING["stale"] = False
+LISTING["complete"] = True
+orch.sonos_start_target(PL)
+assert orch.sonos_map_trusted is True, "a fresh remembered listing is trusted"
+FAKE["log"].clear()
+orch.sonos_snap = dict(orch.sonos_snap, rel_s=2.0)
+orch.sonos_step(1)
+for _ in range(40):
+    if FAKE["log"]:
+        break
+    time.sleep(0.05)
+assert [p for p, _ in FAKE["log"]] == ["/queue_play"], FAKE["log"]
+print("8. remembered-but-fresh listing: trusted, step = /queue_play OK")
+
+# 9. ...and a STALE remembered listing (a 10-row start window, an old ledger)
+#    stays untrusted even when the lengths happen to match — the drift path
+#    (case 5) is the steady state there, never a wrong positional jump
+FAKE["log"].clear()
+LISTING["stale"] = True
+orch.sonos_start_target(PL)
+assert orch.sonos_map_trusted is False, "a stale listing is never trusted"
+LISTING["stale"] = False
+print("9. stale remembered listing: untrusted, re-transfer per press OK")
+
+# 10. the card paints from OUR row whenever the index is CONFIRMED, even on
+#     an untrusted map: the poller matched the playing track's uri to it
+orch.sonos_start_target(PL)
+orch.sonos_map_trusted = False
+orch.sonos_pending = None
+orch.sonos_idx = 1
+orch.sonos_snap = dict(sonos_contract.STATE_SHARE, uid="RINCON_T",
+                       track_no=2, track_spotify_uri="spotify:track:b",
+                       track_title="En0la (DIDL)", track_artist="0MD",
+                       track_art="http://192.168.1.9:1400/getaa?b")
+orch.sonos_snap_at = time.monotonic()
+st = orch.status()
+assert st["title"] == "Enola Gay — OMD" and st["artwork"] == "https://i.scdn.co/b", \
+    (st["title"], st["artwork"])
+assert st["spotify"]["next_artwork"] == "https://i.scdn.co/c", st.get("spotify")
+print("10. untrusted map + uri-confirmed index: card from our row, next cover prewarmed OK")
+
+# 10b. the press itself confirms: during the 8 s settle the speaker still
+#      reports the OLD uri, and the card must show where the kid is GOING
+orch.sonos_idx = 2
+orch.sonos_pending = ("spotify:track:c", time.monotonic())
+st = orch.status()
+assert st["title"] == "Shout — Tears for Fears", st["title"]
+orch.sonos_pending = None
+print("10b. optimistic press: card flips to the pressed row at once OK")
+
+# 11. a track BEYOND the rows we know (a prefix listing): the index cannot
+#     be confirmed -> the speaker's DIDL, never a stale row
+orch.sonos_idx = 2
+orch.sonos_snap = dict(orch.sonos_snap, track_spotify_uri="spotify:track:zz",
+                       track_title="Unknown Twelve", track_artist="Someone",
+                       track_art="http://192.168.1.9:1400/getaa?zz")
+st = orch.status()
+assert st["title"] == "Unknown Twelve" and st["artists"] == ["Someone"], st
+assert st["artwork"] == "http://192.168.1.9:1400/getaa?zz", st["artwork"]
+print("11. uri outside the known rows: DIDL fallback, no stale row OK")
+
+# 12. the speaker's queue_len rides every snapshot: a session ADOPTED at
+#     boot (no hand-off drift check) is untrusted the moment they disagree
+orch.sonos_map_trusted = True
+orch.sonos_snap = dict(orch.sonos_snap, track_spotify_uri="spotify:track:b",
+                       queue_len=7, stale_s=0.5, ours=True)
+daemon._sonos_follow_once = getattr(daemon, "_sonos_follow_once", None)
+src = open(os.path.join(REPO, "pi", "daemon.py")).read()
+body = src[src.index("def _sonos_poller"):]
+assert 'qlen = snap.get("queue_len")' in body and "queue drift" in body, \
+    "the poller must apply the queue_len drift check (adopt-at-boot parity)"
+print("12. poller applies the queue_len drift check for adopted sessions (source pin) OK")
+

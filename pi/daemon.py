@@ -1643,7 +1643,9 @@ class Orchestrator:
                                       or qlen == len(rows)) and not listing.get("stale")
             if not self.sonos_map_trusted:
                 log(f"sonos: queue drift ({qlen} on speaker vs "
-                    f"{len(rows)} listed) — positional jumps disabled")
+                    f"{len(rows)} listed"
+                    + (", listing stale" if listing.get("stale") else "")
+                    + ") — positional jumps disabled")
             self.sonos_bm_hold = None
             self.sonos_pending = (rows[idx]["id"], time.monotonic())
             self.sonos_opt_tr = ("PLAYING", time.monotonic())
@@ -2806,9 +2808,28 @@ class Orchestrator:
                 out["renderer_state"] = "unreachable"
                 out["position"] = self.sonos_snap.get("rel_s")
                 out["duration"] = self.sonos_snap.get("dur_s")
-            if (self.sonos_kind == "spotify_sharelink"
-                    and (self.sonos_idx is None
-                         or not self.sonos_map_trusted)):
+            row = (self.sonos_queue[self.sonos_idx]
+                   if self.sonos_idx is not None and self.sonos_queue
+                   else None)
+            # The card paints from OUR row whenever the index is CONFIRMED
+            # (AM-102): the map is trusted, or the poller matched the
+            # playing track's own uri to this row, or the row is the press
+            # the kid just made (sonos_pending, the 8 s settle in which the
+            # speaker still reports the OLD track). Trust used to decide
+            # this too, and under soloist the hand-off listing is a
+            # remembered one, so the card sat on the speaker's DIDL for the
+            # whole session: title/artist per 15 s poll, art fetched from
+            # the speaker per track (field, the daughter's box 2026-09-22).
+            # The DIDL stays the fallback for an unknown position — and for
+            # a track BEYOND the rows we know (a 10-row start window),
+            # where a matched-nothing index would paint a stale row.
+            turi = (snap or {}).get("track_spotify_uri")
+            pend = self.sonos_pending
+            confirmed = row is not None and (
+                self.sonos_map_trusted
+                or (turi and row.get("id") == turi)
+                or (pend and pend[0] == row.get("id")))
+            if self.sonos_kind == "spotify_sharelink" and not confirmed:
                 # untrusted map / unknown position: the speaker's DIDL is
                 # the only truth available — demoted fallback, never the
                 # primary (v2)
@@ -2816,12 +2837,18 @@ class Orchestrator:
                 out["artwork"] = (snap or {}).get("track_art")
                 if (snap or {}).get("track_artist"):
                     out["artists"] = [snap["track_artist"]]
-            elif self.sonos_idx is not None and self.sonos_queue:
-                ep = self.sonos_queue[self.sonos_idx]
-                out["title"] = (ep.get("title")
+            elif row is not None:
+                out["title"] = (row.get("title")
                                 or (snap or {}).get("track_title"))
-                out["episode_id"] = ep.get("id")
-                out["artwork"] = ep.get("image")  # same shape as mpv card
+                out["episode_id"] = row.get("id")
+                out["artwork"] = row.get("image")  # same shape as mpv card
+                if self.sonos_kind == "spotify_sharelink":
+                    # the next row's cover, for the screen's art prewarm
+                    # (ui.py reads spotify.next_artwork) — the first pass
+                    # through a list paints each skip instantly (AM-102)
+                    nxt = self.sonos_queue[(self.sonos_idx + 1)
+                                           % len(self.sonos_queue)]
+                    out["spotify"] = {"next_artwork": nxt.get("image")}
             return out
         if mpv_alive and source == "mpv":
             # gated on source too: a lingering/starting mpv child while
@@ -4732,6 +4759,17 @@ def _sonos_poller():
                         ORCH.sonos_idx = hit
                     elif snap.get("ours"):
                         ORCH.sonos_map_trusted = False
+                # the speaker's queue length is in every snapshot: a
+                # session adopted at boot never had the hand-off's drift
+                # check, so apply it here (AM-102) — once, loudly
+                qlen = snap.get("queue_len")
+                if (qlen is not None and ORCH.sonos_queue
+                        and ORCH.sonos_map_trusted
+                        and qlen != len(ORCH.sonos_queue)):
+                    ORCH.sonos_map_trusted = False
+                    log(f"sonos: queue drift ({qlen} on speaker vs "
+                        f"{len(ORCH.sonos_queue)} listed) — positional "
+                        "jumps disabled")
             rel, dur = snap.get("rel_s"), snap.get("dur_s")
             if (ORCH.sonos_kind in ("url", "spotify_sharelink")
                     and rel is not None

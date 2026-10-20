@@ -107,6 +107,12 @@ WARM_PASS_MAX_ITEMS = int(os.environ.get("VIBB_WARM_PASS_MAX_ITEMS", "100"))
 # sweep so every sweep re-checks the lists for added/removed rows (owner,
 # 2026-09-06; AM-87 — was 24 h)
 WARM_VERIFY_S = float(os.environ.get("VIBB_WARM_VERIFY_S", str(5 * 3600)))
+# A remembered order is served WITHOUT `stale` (the daemon may trust its
+# indices for Sonos positional jumps, AM-102) only while the pass has proved
+# it complete AND verified it within this window: the sweep re-verifies every
+# 6 h, so a day covers a missed sweep; older than that the order may have been
+# edited unseen and stays stale (untrusted) until the next pass.
+LISTING_TRUST_S = float(os.environ.get("VIBB_LISTING_TRUST_S", str(24 * 3600)))
 WARM_LEDGER_TTL_S = 30 * 24 * 3600     # Soloist's own eviction is invisible: re-walk after this
 WARM_MAX_STALLS = 3
 LEDGER_V = 2                           # AM-85: v1 rows called a one-window order 'complete'
@@ -1562,8 +1568,14 @@ class Engine:
             # must not trust its indices
             rows = self._remembered(uri)
             rec = self.orders.get(uri) or {}
+            # stale = the daemon must not trust the indices (AM-74); a complete,
+            # recently verified order is NOT stale (AM-102: the Sonos hand-off
+            # then jumps by index and paints the card from these rows, as on
+            # go-librespot) — the ledger row is the proof, read without the
+            # cache-stamp reset so a pass in another cache still counts
             return {"ready": True, "cached": len(rows), "length": len(rows), "tracks": rows,
-                    "stale": True, "remembered_at": rec.get("remembered_at"),
+                    "stale": listing_stale(rec, self.ledger.get(uri)),
+                    "remembered_at": rec.get("remembered_at"),
                     "complete": bool(rec.get("complete"))}
         tracks, fresh = self._queue_rows()
         if tracks is None:
@@ -1582,6 +1594,19 @@ class Engine:
         # only then may a bookmark be judged against it (AM-95 (6))
         return {"ready": True, "cached": len(out), "length": len(out), "tracks": out,
                 "complete": bool((self.orders.get(uri) or {}).get("complete"))}
+
+def listing_stale(rec, entry, now=None):
+    """AM-102: is a remembered order too uncertain to index into? Fresh =
+    the order reached the context's end (complete) and the warm pass verified
+    it within LISTING_TRUST_S — the same proof warm_start accepts as 'done'.
+    Anything less (a 10-row start window, a never-walked list, a week-old
+    ledger) is stale: the picker still shows it, the Sonos hand-off falls
+    back to a re-transfer per press instead of a wrong positional jump."""
+    now = time.time() if now is None else now
+    verified = (entry or {}).get("verified_at") or 0
+    return not ((rec or {}).get("complete") and (entry or {}).get("result") == "done"
+                and verified and now - verified < LISTING_TRUST_S)
+
 
 ENGINE = Engine()
 
