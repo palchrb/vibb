@@ -59,6 +59,24 @@ def last_activity():
 # bounce (which just re-bursts the shared 2.4GHz radio and re-flaps the
 # speaker). Advisory, crash-safe, tmpfs — same contract as the radio
 # markers.
+# The systemd unit of whichever Spotify engine this box was installed
+# with (PLAN-soloistd.md: the engine is an INSTALL-TIME toggle, and the
+# daemon's ~30 REST call sites are already engine-blind through
+# VIBB_GO_API). The unit NAME was the half that was still hardcoded in
+# 14 places; everything goes through go_unit_cmd() now, so swapping the
+# engine is an env pair on the units and nothing else.
+GO_UNIT = os.environ.get("VIBB_GO_UNIT", "go-librespot")
+
+
+def go_unit_cmd(*args):
+    """systemctl argv for the Spotify engine's unit.
+
+    go_unit_cmd("restart")               -> systemctl restart <unit>
+    go_unit_cmd("is-active", "--quiet")  -> systemctl is-active --quiet <unit>
+    """
+    return ["systemctl", *args, GO_UNIT]
+
+
 GO_RESTART_FILE = os.path.join(RUN_DIR, "vibb-go-restart")
 
 

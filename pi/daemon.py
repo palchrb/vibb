@@ -112,6 +112,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The vibb package sits next to this script in the repo, or under
@@ -123,6 +124,8 @@ for _p in (_here, "/usr/local/lib/vibb-py"):
             sys.path.insert(0, _p)
         break
 from vibb import backup as _backup  # noqa: E402 — state snapshots to restic
+from vibb import audio as _audio  # noqa: E402
+from vibb import paths  # noqa: E402
 from vibb import content, mpv as _mpv, spotify as _spotify  # noqa: E402
 from vibb import renderer as _renderer  # noqa: E402 — sonos axis+client
 from vibb import spotify_web as _spotify_web  # noqa: E402
@@ -142,7 +145,7 @@ def _uptime():
 
 from vibb.paths import (  # noqa: E402
     ART_DIR, MEDIA_DIR, RUN_DIR, STATE_DIR, clock_trusted,
-    go_restarted_within,
+    go_restarted_within, go_unit_cmd,
     note_go_restart)
 
 # Module-level aliases: internal code (and the tests, which monkeypatch
@@ -160,10 +163,33 @@ LAST_FILE = os.path.join(STATE_DIR, "last-play.json")
 VOL_FILE = os.path.join(STATE_DIR, "volume.json")
 
 
-def _local_volume(stored, pcm):
-    """Volume to USE for this pcm — capped on the built-in speaker."""
-    return _cap_local_volume(
-        stored, pcm, load_settings().get("local_fallback_cap", 35))
+def _names(seq):
+    """Artist lists for /status: strings only. A bookmark or a queue row
+    written before soloistd filtered nameless creators carries None, and
+    the screen's ', '.join() died on it (Zero 2026-09-05)."""
+    return [a for a in (seq or []) if isinstance(a, str) and a]
+
+
+def _local_volume(stored):
+    """Volume to USE at a landing, on any output: min(stored, volume_cap)."""
+    return _cap_local_volume(stored, load_settings().get("volume_cap", 100))
+
+
+def _go_volume_cap(pcm):
+    """A live go-librespot reopen onto the HAT keeps the session's
+    volume — the level a parent set for HEADPHONES. Re-apply the cap for
+    the device it just landed on, at use (volume.json untouched), exactly
+    like the mpv live retarget does (PLAN-pipewire-soloist.md §F, NEW-1:
+    until 2026-09-02 Spotify reached the amplifier uncapped on every
+    path). Outside ORCH.lock: the API can be slow and the screen's 1/s
+    /status readers must not queue behind it."""
+    try:
+        v = _local_volume(ORCH._volume_setting())
+        steps = go_status(timeout=2).get("volume_steps") or 65535
+        go("/player/volume", timeout=2, body={"volume": round(v * steps / 100)})
+        log(f"go-librespot on the speaker: volume capped to {v}")
+    except OSError:
+        pass
 NOW_FILE = os.path.join(STATE_DIR, "now-playing.json")
 QUEUE_FILE = os.path.join(STATE_DIR, "now-queue.json")
 
@@ -179,6 +205,114 @@ _sonos_wake = threading.Event()  # poke the sonos poller (controls, switch)
 # in /status as spotify_offline so the clients can SAY "no internet"
 # instead of silently failing (wifi can be up while the WAN is dead)
 _SPOT_OFFLINE = [False]
+# The Soloist API key file the PWA writes (KEY=VALUE for the unit's
+# EnvironmentFile=; 0600; SECRET tier of the backup). PLAN-pipewire-soloist D2.
+SOLOIST_ENV = os.environ.get("VIBB_SOLOIST_ENV", "/etc/vibb/soloist.env")
+# Engine states in which NO session can come, whatever we wait for — the
+# daemon fast-fails a Spotify tap on them instead of spawning a player that
+# waits 30 s for a username and exits into a dead box (AM-48)
+ENGINE_NO_SESSION = ("needs-key", "needs-pair", "expired", "bad-key",
+                     "audio-unbound")
+
+
+def _sidecar_post(path, body=None, timeout=5):
+    """POST to the engine sidecar's own (non-dialect) endpoints."""
+    import urllib.error
+    req = urllib.request.Request(_spotify.API + path, data=json.dumps(body or {}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+
+
+_UPDATE_KICK = {"at": 0.0}
+UPDATE_KICK_COOLDOWN_S = float(os.environ.get("VIBB_SOLOIST_UPDATE_KICK_S", "600"))
+
+
+def _kick_soloist_update(why):
+    """An EXPIRED Soloist build must not wait for the next idle shutdown
+    or the 6 h timer: the moment anyone notices — a tap on a Spotify card,
+    the supervisor's tick after boot, the PWA's button — start the
+    updater unit now, --no-block, at most once per cooldown. The unit's
+    own gates (trusted clock, busy) still apply; the sidecar drops the
+    latch and restarts the child when it is idle (it is: nothing plays).
+    Owner 2026-09-04: 'da burde man kunne kicke ny download'."""
+    if paths.GO_UNIT != "vibb-soloistd":
+        return False
+    now = time.monotonic()
+    if now - _UPDATE_KICK["at"] < UPDATE_KICK_COOLDOWN_S:
+        return False
+    _UPDATE_KICK["at"] = now
+    try:
+        subprocess.run(["systemctl", "start", "--no-block",
+                        "vibb-soloist-update.service"], timeout=10)
+        log(f"soloist build expired ({why}) — update kicked")
+        return True
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"soloist update kick failed: {e!r}")
+        return False
+
+
+_WARM = {"at": 0.0, "val": None}
+
+
+def _warming():
+    """The sidecar's running pass (4d), or None — read at most every 5 s so
+    the screen's 1/s /status poll never queues behind the sidecar."""
+    if paths.GO_UNIT != "vibb-soloistd":
+        return None
+    now = time.monotonic()
+    if now - _WARM["at"] < 5.0:
+        return _WARM["val"]
+    _WARM["at"] = now
+    try:
+        with urllib.request.urlopen(_spotify.API + "/soloist/health", timeout=1) as r:
+            h = json.loads(r.read() or b"{}")
+        w = h.get("warming")
+        # an expired deadline reads as no pass (AM-63)
+        _WARM["val"] = w if (w and (w.get("until") or 0) > time.time()) else None
+    except (OSError, ValueError):
+        _WARM["val"] = None
+    return _WARM["val"]
+
+
+def _warm_abort_wait(why, timeout=10.0):
+    """The kid comes first (AM-65): abort a running pass and wait for the
+    sidecar to hand the child back BEFORE any BT page or play goes out."""
+    if not _warming():
+        return False
+    log(f"warm: aborting the pass ({why})")
+    try:
+        _sidecar_post("/cache/abort", timeout=25)
+    except Exception:
+        pass
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        _WARM["at"] = 0.0
+        if not _warming():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _engine_state():
+    """The Spotify engine's own verdict (soloistd's spotify_state), or the
+    go-librespot-era pair: 'offline' while the supervisor holds the unit
+    parked for no internet, else 'ok'."""
+    try:
+        st = go_status(timeout=2)
+    except OSError:
+        st = {}
+    s = st.get("spotify_state") if isinstance(st, dict) else None
+    if s:
+        return s
+    return "offline" if _SPOT_OFFLINE[0] else "ok"
+
 
 
 def _queue_map():
@@ -657,8 +791,15 @@ class Orchestrator:
         with self.lock:
             if self.child is not child or self._mpv_alive():
                 return 0.0  # another path already spawned/stopped it
-            self._crash_respawns += 1
-            log(f"player died (rc {child.poll()}) while playing — "
+            rc = child.poll()
+            if rc != _audio.SINK_WAIT_EXIT:
+                self._crash_respawns += 1
+            else:
+                # 'the sink node was not there yet' (pipewire, AM-9) is
+                # not a crash: the player declined to spawn into a void
+                # and _audio_ready() above says the node exists NOW
+                pass
+            log(f"player died (rc {rc}) while playing — "
                 f"respawning ({self._crash_respawns}/2 this boot)")
             self.child = None
             self._spawn(target, reverse=reverse, resume=resume,
@@ -720,8 +861,8 @@ class Orchestrator:
         was just) started, False when there is genuinely no internet so
         the caller can fail FAST instead of a 30s silent session-wait."""
         try:
-            if subprocess.run(["systemctl", "is-active", "--quiet",
-                               "go-librespot"], timeout=10).returncode == 0:
+            if subprocess.run(go_unit_cmd("is-active", "--quiet"),
+                              timeout=10).returncode == 0:
                 return True
         except (OSError, subprocess.TimeoutExpired):
             return True  # can't tell — let the normal path try
@@ -730,7 +871,7 @@ class Orchestrator:
             return False
         _SPOT_OFFLINE[0] = False
         try:
-            subprocess.run(["systemctl", "start", "go-librespot"],
+            subprocess.run(go_unit_cmd("start"),
                            timeout=30)
             log("go-librespot was parked — started for the play request")
         except (OSError, subprocess.TimeoutExpired):
@@ -868,6 +1009,7 @@ class Orchestrator:
         # resume-in-place shortcut anyway (its API is down), and when
         # the shortcut does hit, the extra is-active probe is a no-op.
         backend_ok = not is_spotify(target) or self._ensure_spotify_backend()
+        engine_state = _engine_state() if is_spotify(target) else "ok"
         if not boot:
             _SESSION["live"] = False   # a tap ends the power-on session
         with self.lock:
@@ -897,6 +1039,7 @@ class Orchestrator:
                         return {"status": "already-started"}
                 except OSError:
                     pass  # api busy/down — the guards above suffice
+            _warm_abort_wait("play")   # before the page: never "BT paging + wifi" (AM-65)
             _kick_bt_connect()  # pressing play = wanting sound NOW
             # Same card back in the slot (or same link replayed): if its
             # session is still loaded, unpause instead of restarting.
@@ -927,6 +1070,16 @@ class Orchestrator:
                                 "resumed": True}
                 except OSError:
                     pass  # session gone — fall through to respawn (bookmark)
+            if is_spotify(target) and engine_state in ENGINE_NO_SESSION:
+                # the engine itself says no session can come (no key, not
+                # paired, an expired build, a mis-bound stream): say so NOW
+                # — the same bedtime rule as the no-internet case below
+                log(f"play: spotify engine {engine_state} — can't start")
+                if engine_state == "expired":
+                    _kick_soloist_update("play tap")
+                return {"source": "spotify", "target": target,
+                        "error": f"spotify-{engine_state}",
+                        "spotify_state": engine_state}
             if is_spotify(target) and not backend_ok:
                 # parked and genuinely offline: say so NOW — spawning a
                 # player that waits 30s for a session that cannot come
@@ -989,7 +1142,7 @@ class Orchestrator:
         """One volume knob for the box: set/adjust whatever is active.
         mpv gets its softvol (0-100); Spotify gets go-librespot's volume
         scaled from our 0-100 to its volume_steps."""
-        cap = load_settings()["volume_cap"]  # child-safety ceiling
+        cap = load_settings()["volume_cap"]  # child-safety ceiling, every output
         if self.source == "sonos":
             # No cap on the remote renderer (owner decision 2026-08-09):
             # the amplifier is a family speaker in a shared room, not the
@@ -1438,7 +1591,8 @@ class Orchestrator:
         else:
             try:
                 listing = _spotify.context_tracks(uri, settle_s=10) or {}
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                log(f"sonos: spotify listing unavailable for {uri} ({e!r})")
                 return {"error": "spotify-listing-unavailable"}
         rows = []
         for t in listing.get("tracks") or []:
@@ -1453,6 +1607,8 @@ class Orchestrator:
                 "image": tr.get("album_cover_url"),
                 "dur_s": (dur / 1000.0) if dur else None})
         if not rows:
+            log(f"sonos: nothing to play for {uri} — listing ready={listing.get('ready')} "
+                f"length={listing.get('length')} rows={len(listing.get('tracks') or [])}")
             return {"error": "nothing-to-play"}
         try:
             go("/player/pause")  # quiesce the box's own session
@@ -1481,8 +1637,10 @@ class Orchestrator:
             self.sonos_queue, self.sonos_idx = rows, idx
             self.sonos_ctx = uri
             qlen = resp.get("queue_len")
+            # a listing remembered from a past start (AM-74) may be reordered
+            # since: never trust positional jumps on it — the drift resync heals
             self.sonos_map_trusted = (qlen is None
-                                      or qlen == len(rows))
+                                      or qlen == len(rows)) and not listing.get("stale")
             if not self.sonos_map_trusted:
                 log(f"sonos: queue drift ({qlen} on speaker vs "
                     f"{len(rows)} listed) — positional jumps disabled")
@@ -1723,6 +1881,13 @@ class Orchestrator:
         pcm = OUTPUT_PCMS.get(device)
         if not pcm:
             return None  # handler answers 400
+        if fallback and device == "bt" and _audio.stack() == "pipewire":
+            # btwatchd's announce: the speaker's node may be new (first
+            # connect after boot) or renamed (package upgrade) since
+            # asound.conf was written, and this path is about to point
+            # mpv/go-librespot at vibb_bt. Refresh the pin FIRST — file
+            # only, the single reopen below stays the one reopen (AM-10).
+            _audio.ensure_bt_route(_speaker_mac())
         if fallback and device == "local" and not _i2s_card_present():
             # btwatchd's speaker-away fallback: without a built-in/HAT
             # card there is nothing to fall back TO — keep bt configured
@@ -1732,7 +1897,7 @@ class Orchestrator:
         if fallback and current_output()["output"] == device:
             # converge anyway: a deferred mpv switch (transport wasn't up
             # when the user flipped the output) applies on this announce
-            if device == "bt" and _bt_transport_ready():
+            if device == "bt" and _bt_output_ready():
                 with self.lock:
                     if self._mpv_alive():
                         try:
@@ -1777,7 +1942,7 @@ class Orchestrator:
                 _kick_bt_connect()
             mpv_switched = False
             if self._mpv_alive():
-                if device == "bt" and not _bt_transport_ready():
+                if device == "bt" and not _bt_output_ready():
                     # NEVER point a live mpv at a bluealsa device with no
                     # A2DP transport: it errors the track and skips to the
                     # next, over and over (field: 'jumps between episodes
@@ -1797,8 +1962,7 @@ class Orchestrator:
                         # just landed on — at use only, so volume.json
                         # still holds what the user actually chose.
                         if mpv_switched:
-                            v = _local_volume(
-                                self._volume_setting(), pcm)
+                            v = _local_volume(self._volume_setting())
                             mpv_ipc(["set_property", "volume", v])
                     except OSError:
                         pass
@@ -1820,7 +1984,7 @@ class Orchestrator:
         # the screen's 1/s poll — for the whole switch (review R2).
         restarted = False
         go_action = "unchanged"
-        if device == "bt" and not _bt_transport_ready():
+        if device == "bt" and not _bt_output_ready():
             # same rule as mpv above: don't bounce go-librespot into a
             # device with no transport — the restart's wifi burst lands
             # exactly during AVDTP setup on the SHARED radio (the
@@ -1835,6 +1999,7 @@ class Orchestrator:
             # resume and no restart to dedup, and the shared radio stays
             # quiet. This is the path on a current binary.
             go_action = "reopened live"
+            _go_volume_cap(pcm)  # the surviving volume is the headphone one
         else:
             # pre-v0.0.7 fallback: audio_device is startup config there,
             # so the switch is a config rewrite + restart that kills the
@@ -2482,12 +2647,15 @@ class Orchestrator:
         # "succeeds" silently and the button feels dead. Fall through to
         # rule 4 instead: replay the target, which resumes exactly.
         if self.source == "spotify" and st is not None:
-            # v0.0.8: pending_track_uri = a debounced skip is mid-settle;
-            # the session may read trackless for that beat but it is very
+            # A LOADING session reads trackless for a beat but is very
             # much alive — treat it as live, never as empty (field
             # 2026-07-23 22:16: a mid-burst 'empty' read replayed the
-            # whole playlist)
-            if ((st.get("track") or {}) or st.get("pending_track_uri")) \
+            # whole playlist). v0.0.8 said so with pending_track_uri
+            # (the debounce hold only); since v0.2.3 the fork nils the
+            # track for the whole load and says `buffering` instead —
+            # spotify.loading() reads both. A load that FAILS reads
+            # `stopped` since v0.2.4, so this never trusts a dead one.
+            if (st.get("track") or _spotify.loading(st)) \
                     and not st.get("stopped"):
                 if not self._spot_control(action):
                     return {"routed": None, "busy": True}
@@ -2514,8 +2682,8 @@ class Orchestrator:
                 except OSError:
                     log(f"{action}: session state unclear — dropped")
                     return {"routed": None, "busy": True}
-                if ((st2.get("track") or {}) or st2.get(
-                        "pending_track_uri")) and not st2.get("stopped"):
+                if (st2.get("track") or _spotify.loading(st2)) \
+                        and not st2.get("stopped"):
                     if not self._spot_control(action):
                         return {"routed": None, "busy": True}
                     log(f"{action} -> spotify (loaded during recheck)")
@@ -2594,8 +2762,12 @@ class Orchestrator:
                "title": None, "position": None, "duration": None,
                "artwork": None, "episode_id": None, "shuffle": False,
                "spotify_offline": bool(_SPOT_OFFLINE[0]),
+               "spotify_state": _engine_state(),
                "session": _SESSION["verdict"] or "pending",
-               "output": current_output()["output"]}
+               "output": current_output()["output"],
+               "warming": bool(_warming()),   # backup waits (AM-69)
+               # any engine's sweep (AM-101): idle.py holds auto-off on it
+               "sweeping": bool(_warming()) or _library.sweeping()}
         if source == "sonos":
             # Same keys, same units as the mpv card — that identity IS
             # the "only difference is where the sound comes out" promise.
@@ -2736,16 +2908,18 @@ class Orchestrator:
             # (first-listen playlist, api blocked 8-15s) outlived it and
             # the card fell to 'Nothing playing' mid-skip (field
             # 2026-07-19). A fresh BUSY marker, a recent timed-out
-            # control, or a v0.0.8 pending skip proves a load is in
-            # flight: keep the card for the full load-hold window. The
+            # control, or the fork's own loading signal proves a load is
+            # in flight: keep the card for the full load-hold window. The
             # trackless answer need not be EMPTY: mid-settle during a
-            # debounced burst the api answers with pending_track_uri and
-            # no track, and that flashed 'Nothing playing' on the screen
-            # (field 2026-07-23 22:16). A trackless answer WITHOUT any
-            # in-flight signal keeps the old behavior: only a fully
-            # empty response gets the short hold; a deliberate stop
-            # shows immediately.
-            in_flight = bool(st.get("pending_track_uri")) or _radio.busy() \
+            # debounced burst the api answers with no track, and that
+            # flashed 'Nothing playing' on the screen (field 2026-07-23
+            # 22:16). v0.0.8 flagged the hold with pending_track_uri;
+            # since v0.2.3 every load — a PHONE skip's too, which no
+            # BUSY marker covers — reads `buffering` (spotify.loading()).
+            # A trackless answer WITHOUT any in-flight signal keeps the
+            # old behavior: only a fully empty response gets the short
+            # hold; a deliberate stop shows immediately.
+            in_flight = _spotify.loading(st) or _radio.busy() \
                 or (time.monotonic() - self._spot_cmd_timeout_at
                     < SPOT_TIMEOUT_HOLD_S)
             if not st or in_flight:
@@ -2756,15 +2930,17 @@ class Orchestrator:
                     st = dict(cached)  # a load is in flight — hold the card
                     # v0.1.0: the fresh answer's pending/next metadata is
                     # newer than the cached card — carry it over
+                    # (`buffering` too: loading() must still read it)
                     for k in ("pending_track_uri", "pending_track",
-                              "next_track"):
+                              "next_track", "buffering"):
                         if fresh.get(k):
                             st[k] = fresh[k]
         track = st.get("track") or {}
         sp_playing = spotify_playing(st)
         # v0.1.0: the fork's metadata cache (whole-playlist sweep at context
         # load) describes the debounced skip target and the upcoming track
-        # before any stream is loaded
+        # before any stream is loaded. v0.2.4 reports the target only as
+        # pending_track (uri inside); pending_track_uri is derived from it.
         pend_t = st.get("pending_track") or {}
         next_t = st.get("next_track") or {}
         out["spotify"] = {"playing": sp_playing,
@@ -2772,13 +2948,14 @@ class Orchestrator:
                           # uri of the loaded track — the song picker
                           # marks the playing row with it (v0.1.1)
                           "track_uri": track.get("uri") or None,
-                          "artists": track.get("artist_names") or [],
+                          "artists": _names(track.get("artist_names")),
                           "album": track.get("album_name") or None,
                           "artwork": track.get("album_cover_url") or None,
                           # v0.0.8: the not-yet-settled skip target while a
                           # debounced burst is in flight (None otherwise)
                           "pending_track_uri":
-                              st.get("pending_track_uri") or None,
+                              st.get("pending_track_uri")
+                              or pend_t.get("uri") or None,
                           # v0.1.0: upcoming track's cover — the UI prewarms
                           # its art cache so the NEXT skip shows art instantly
                           "next_artwork":
@@ -2819,7 +2996,7 @@ class Orchestrator:
             if art:
                 out["artwork"] = art
             out["spotify"]["track"] = pend_t.get("name") or None
-            out["spotify"]["artists"] = pend_t.get("artist_names") or []
+            out["spotify"]["artists"] = _names(pend_t.get("artist_names"))
             out["spotify"]["album"] = pend_t.get("album_name") or None
             if art:
                 out["spotify"]["artwork"] = art
@@ -2869,7 +3046,7 @@ class Orchestrator:
                 out["spotify"] = dict(out["spotify"],
                                       track=(bm or {}).get("name"),
                                       track_uri=(bm or {}).get("uri"),
-                                      artists=(bm or {}).get("artists") or [],
+                                      artists=_names((bm or {}).get("artists")),
                                       album=None,
                                       artwork=out["artwork"])
         # Ghost sessions: nothing is live, but a bookmarked target is
@@ -3004,6 +3181,11 @@ class Orchestrator:
             # the field's presence, so this is a clean no-op there. The
             # bt_lost/bt_waiting resume path below is untouched (QA).
             out["bt_connected"] = _bt_transport_ready()
+        if _audio.stack() == "pipewire":
+            # the policy self-test's verdict (ok | fail-safety | fail-rf |
+            # down | pending) — key-guarded like bt_connected, so bluealsa
+            # boxes emit nothing and the UI fold is a no-op there
+            out["audio_policy"] = _audio.selftest_state().get("verdict") or "pending"
         if out["bt_lost"] or out["bt_waiting"]:
             # both speaker popups offer the same escape — A plays on the
             # built-in speaker instead — but only where one exists
@@ -3055,7 +3237,7 @@ def _net_changed():
         return
     log("network changed — restarting go-librespot (stale connections)")
     try:
-        subprocess.run(["systemctl", "try-restart", "go-librespot"],
+        subprocess.run(go_unit_cmd("try-restart"),
                        timeout=30)
         _note_go_restart()
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -3735,6 +3917,58 @@ class Handler(BaseHTTPRequestHandler):
                     save_library(normalize_library(lib))
                 log(f"section logo {'set' if data else 'removed'}: {sid}")
                 self._send(200, lib)
+            elif self.path == "/soloist/configure":
+                # The Soloist API key, pasted in the PWA (D2/AM-46/47). Only
+                # the soloist engine has anywhere to put it. Written 0600 as
+                # KEY=VALUE for the unit's EnvironmentFile=, then the unit is
+                # restarted (it reads the file at start; the sidecar answers
+                # needs-key / bad-key / expired / ok on /soloist/health). An
+                # empty key REMOVES the file -> needs-key. Never logged.
+                key = body.get("api_key")
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist",
+                                     "engine": paths.GO_UNIT})
+                elif key is None or not isinstance(key, str) or len(key) > 512 \
+                        or (key and (not key.isprintable() or any(c.isspace() for c in key))):
+                    self._send(400, {"error": "bad-key-shape"})
+                else:
+                    try:
+                        if key:
+                            _backup._write_secret_text(SOLOIST_ENV,
+                                                       f"SOLOIST_API_KEY={key}")
+                        else:
+                            try:
+                                os.remove(SOLOIST_ENV)
+                            except FileNotFoundError:
+                                pass
+                        subprocess.run(go_unit_cmd("--no-block", "restart"),
+                                       timeout=10)
+                        log("soloist: API key " + ("updated" if key else "removed")
+                            + " — engine restarting")
+                        self._send(202, {"restarting": True,
+                                         "removed": not key})
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        self._send(500, {"error": "write-failed",
+                                         "detail": e.__class__.__name__})
+            elif self.path == "/soloist/update":
+                # the PWA's 'Update Spotify now' (token-gated); same kick,
+                # same cooldown — the unit reports through /soloist/health
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist"})
+                else:
+                    self._send(202, {"kicked": _kick_soloist_update("pwa")})
+            elif self.path == "/soloist/pair":
+                # proxied to the sidecar (it owns the data dir): stop the
+                # child, run `soloist --pair`, start again. Token-gated here.
+                if paths.GO_UNIT != "vibb-soloistd":
+                    self._send(409, {"error": "engine-not-soloist"})
+                else:
+                    try:
+                        code, r = _sidecar_post("/soloist/pair")
+                        self._send(code, r)
+                    except OSError as e:
+                        self._send(503, {"error": "engine-unreachable",
+                                         "detail": e.__class__.__name__})
             elif self.path == "/backup/configure":
                 # Point the box at ANY rclone-backed restic repo. The owner
                 # runs `rclone config` on their own machine (which is what
@@ -3749,6 +3983,15 @@ class Handler(BaseHTTPRequestHandler):
                         path=body.get("path") or None))
                 except RuntimeError as e:
                     self._send(400, {"error": str(e)})
+            elif self.path == "/audio/selftest":
+                # re-run the policy probes now (pipewire only): ~5s of
+                # silent streams, off the request thread
+                if _audio.stack() != "pipewire":
+                    self._send(409, {"error": "audio-stack-not-pipewire"})
+                else:
+                    threading.Thread(target=_audio_policy_run, args=("request",),
+                                     daemon=True).start()
+                    self._send(202, {"started": True})
             elif self.path == "/backup/now":
                 try:
                     r = _backup.backup_now()
@@ -3810,7 +4053,7 @@ class Handler(BaseHTTPRequestHandler):
                     _SPOT_OFFLINE[0] = False
                     threading.Thread(
                         target=lambda: subprocess.run(
-                            ["systemctl", "start", "go-librespot"],
+                            go_unit_cmd("start"),
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, timeout=30),
                         daemon=True).start()
@@ -4673,20 +4916,63 @@ def _bt_recover(verb):
         for line in (r.stdout or "").splitlines():
             if line.strip():
                 log(f"bt-recovery: {line.strip()}")
+        # (AM-92: no self-test after a recovery any more — the probes only
+        # competed for CPU in the seconds the reconnect + resume need)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"bluetooth recovery ({verb}) failed: {e!r}")
         return False
 
 
-def _bt_transport_ready():
-    """Does the configured speaker have a live A2DP PCM right now?"""
+_AUDIO_POLICY_LOCK = threading.Lock()
+
+
+def _audio_policy_run(why):
+    """One self-test run at a time; a second trigger while one runs is
+    dropped (the running one answers the same question)."""
+    if not _AUDIO_POLICY_LOCK.acquire(blocking=False):
+        return
+    try:
+        log(f"audio policy self-test ({why})")
+        _audio.policy_selftest()
+    except Exception as e:
+        log(f"audio policy self-test failed to run: {e!r}")
+    finally:
+        _AUDIO_POLICY_LOCK.release()
+
+
+# The policy self-test runs ON REQUEST only (POST /audio/selftest, or from a
+# shell: `cd ~/vibb/pi && sudo python3 -c 'from vibb import audio; print(audio.policy_selftest())'`).
+# It used to run at boot and on every PipeWire restart (AM-7/AM-8); under the
+# boot storm its 1 s probe waits read FAIL-SAFETY falsely, its verdict feeds
+# nothing but /status.audio_policy, and it cost ~6 s of CPU while the screen
+# came up — owner 2026-09-07, AM-92: a guard to run after an upgrade, not a
+# boot step.
+
+
+def _speaker_mac():
     try:
         with open(_bt.MAC_FILE) as f:
-            mac = f.read().strip()
-        return bool(mac) and btbus.a2dp_pcm_present(mac)
+            return f.read().strip()
     except OSError:
+        return ""
+
+
+def _bt_transport_ready():
+    """Does the configured speaker have a live A2DP PCM right now?"""
+    mac = _speaker_mac()
+    return bool(mac) and btbus.a2dp_pcm_present(mac)
+
+
+def _bt_output_ready():
+    """The transport AND, under pipewire, the sink node (AM-11): a pcm
+    pinned to a node that is not there yet fails at hw_params, and the
+    transport precedes its node by milliseconds. Only for the switch
+    paths (one pw-dump each) — the 1/s readers keep the D-Bus gate."""
+    if not _bt_transport_ready():
         return False
+    return (_audio.stack() != "pipewire"
+            or _audio.sink_ready("bt", _speaker_mac()))
 
 
 _BT_HEAL = {"lock": threading.Lock(), "last": 0.0}
@@ -4987,6 +5273,7 @@ def _go_output_rebuild():
         # login never dropped, so skip the wait-for-login below.
         log("go-librespot output reopened live on the current device "
             "(no restart, session kept)")
+        _go_volume_cap(pcm)  # a rebuild onto the HAT lands at headphone level
         return
     # pre-v0.0.7 fallback: audio_device is startup config, so rebuilding
     # the device means a restart (which drops the session -> replay-last).
@@ -4999,7 +5286,7 @@ def _go_output_rebuild():
     else:
         log("rebuilding go-librespot's audio output (restart)")
         try:
-            subprocess.run(["systemctl", "restart", "go-librespot"],
+            subprocess.run(go_unit_cmd("restart"),
                            timeout=30)
         except (OSError, subprocess.TimeoutExpired) as e:
             log(f"go-librespot output rebuild failed: {e!r}")
@@ -5154,7 +5441,7 @@ def _go_unit_active():
     'actually down'. Busy must never be treated as dead."""
     try:
         return subprocess.run(
-            ["systemctl", "is-active", "--quiet", "go-librespot"],
+            go_unit_cmd("is-active", "--quiet"),
             timeout=10).returncode == 0
     except (OSError, subprocess.TimeoutExpired, AttributeError):
         return False
@@ -5178,6 +5465,10 @@ def _spotify_supervisor():
     while True:
         _tick(20 if (parked or _SPOT_OFFLINE[0]) else idle_tick_s)
         try:
+            if paths.GO_UNIT == "vibb-soloistd" and _engine_state() == "expired":
+                # after a boot onto an expired build nobody has tapped yet:
+                # fetch the new one without waiting for a shutdown
+                _kick_soloist_update("supervisor tick")
             if _radio.paging():
                 # a BT page owns the radio right now — a probe result is
                 # noise either way (field 2026-07-18 20:17: page-deauthed
@@ -5187,7 +5478,7 @@ def _spotify_supervisor():
                 misses = 0
                 _SPOT_OFFLINE[0] = False
                 if parked:
-                    subprocess.run(["systemctl", "start", "go-librespot"],
+                    subprocess.run(go_unit_cmd("start"),
                                    timeout=30)
                     log("spotify: internet is back — go-librespot started")
                     _note_go_restart()  # the ip watchdog must not re-restart it
@@ -5244,7 +5535,7 @@ def _spotify_supervisor():
                     continue
                 _SPOT_OFFLINE[0] = True
                 if _go_unit_active():  # don't fork systemctl every tick
-                    subprocess.run(["systemctl", "stop", "go-librespot"],
+                    subprocess.run(go_unit_cmd("stop"),
                                    timeout=30)
                 if not parked:
                     log("spotify: no internet — go-librespot parked "
@@ -5447,6 +5738,13 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def _redirect(self):
         host = self.request.getsockname()[0]  # our address on that network
+        # A browser that typed http://vibbe.local must land on the .local
+        # ORIGIN, not the IP: the PWA stores the box token per origin, so
+        # the IP form is "not linked" (owner 2026-09-05). Captive probes
+        # carry foreign hosts (connectivitycheck.gstatic.com) and keep the IP.
+        asked = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+        if asked.endswith(".local") and all(c.isalnum() or c in ".-" for c in asked):
+            host = asked
         self.send_response(302)
         self.send_header("Location", f"http://{host}:{PORT}/")
         self.send_header("Content-Length", "0")
@@ -5757,6 +6055,7 @@ def main():
     except ValueError:
         pass  # not the main thread (tests run main() in a thread)
     _library.BUSY_CHECK = _audible_now  # the sweep yields to live audio
+    _library.WARM_START = _PS_KICK.set   # a pass starts: wifi power save off under the CDN burst (AM-67)
     threading.Thread(target=_wifi_ps_governor, daemon=True).start()
     # Settle the session verdict in its own thread. It used to hang off
     # the boot-resume thread, which returned early on the common boots

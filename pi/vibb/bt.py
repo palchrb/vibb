@@ -54,7 +54,7 @@ for _p in (_here, "/usr/local/lib/vibb-py"):
         break
 from vibb import btbus  # noqa: E402
 from vibb.btbus import _run, log  # noqa: E402 — shared helpers
-from vibb.paths import STATE_DIR, note_go_restart  # noqa: E402
+from vibb.paths import STATE_DIR, go_unit_cmd, note_go_restart  # noqa: E402
 
 MAC_FILE = os.environ.get("VIBB_BT_FILE", "/etc/vibb/bt-headset")
 # vibbd touches this when the user switches output to bt while the
@@ -241,7 +241,8 @@ def recover():
     _run(["systemctl", "stop", "bluetooth"], timeout=30)
     _reattach_firmware()
     _run(["systemctl", "start", "bluetooth"], timeout=30)
-    for unit in ("bluealsa", "bluealsad"):  # name differs across releases
+    from vibb import audio  # lazy: keeps the cli path import-light
+    for unit in audio.recover_units():  # bluealsa; nothing under pipewire
         _run(["systemctl", "try-restart", unit], timeout=30)
     time.sleep(3)
     _run(["rfkill", "unblock", "bluetooth"], timeout=10)
@@ -391,7 +392,10 @@ def connect(mac):
         log("==> Audio transport ready.")
     else:
         log("WARNING: bluetooth connected, but no A2DP audio transport appeared.")
-        log("Debug with: bluealsa-aplay -L   and   journalctl -u bluealsa -n 20")
+        from vibb import audio
+        log("Debug with: wpctl status   and   journalctl -u wireplumber -n 20"
+            if audio.stack() == "pipewire" else
+            "Debug with: bluealsa-aplay -L   and   journalctl -u bluealsa -n 20")
 
     os.makedirs(os.path.dirname(MAC_FILE), exist_ok=True)
     _persist_mac(mac)
@@ -427,20 +431,23 @@ def _disconnect_others(mac):
             btbus.disconnect_device(d["mac"])
 
 
-def _route_alsa(mac):
-    """Point the vibb_bt ALSA device at this headset (vibb_local for
-    the HAT speaker is kept alongside)."""
-    try:
-        with open(ASOUND) as f:
-            if mac in f.read():
-                return
-    except OSError:
-        pass
-    # tmp+rename: a brown-out mid-write would otherwise truncate
-    # asound.conf — BOTH pcms gone, every output silent, and nothing
-    # heals it (review 2026-07-18 R3)
-    with open(ASOUND + ".tmp", "w") as f:
-        f.write(f'''# Managed by vibb (bt.py)
+# Debian's pipewire-alsa maps ALSA 'default' to PipeWire through this file;
+# on a box rolled back to bluealsa an apt upgrade may recreate it, so the
+# bluealsa template pins 'default' to the HAT whenever it exists (AM-15).
+PW_DEFAULT_CONF = os.environ.get("VIBB_ALSA_PW_DEFAULT",
+                                 "/etc/alsa/conf.d/99-pipewire-default.conf")
+
+
+def _bluealsa_asound_text(mac):
+    default = ""
+    if os.path.exists(PW_DEFAULT_CONF):
+        default = '''# pipewire-alsa's 'default' override is installed: keep default on the HAT
+pcm.!default {
+    type plug
+    slave.pcm "hw:sndrpihifiberry"
+}
+'''
+    return f'''# Managed by vibb (bt.py)
 pcm.vibb_bt {{
     type plug
     slave.pcm {{
@@ -455,13 +462,55 @@ pcm.vibb_local {{
     type plug
     slave.pcm "hw:sndrpihifiberry"
 }}
-''')
+''' + default
+
+
+def write_asound(text):
+    """tmp+fsync+rename: a brown-out mid-write would otherwise truncate
+    asound.conf — BOTH pcms gone, every output silent, and nothing heals
+    it (review 2026-07-18 R3). The tmp name carries the pid: under
+    pipewire the daemon's announce path is a second writer (AM-10), and
+    two processes sharing one tmp could rename a truncated file into
+    place — the exact hole the fsync closed."""
+    tmp = f"{ASOUND}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(text)
         f.flush()
-        os.fsync(f.fileno())  # same power-cut hole as _persist_mac — an
-        # empty asound.conf is WORSE: both pcms gone, every output
-        # silent, and nothing heals it
-    os.replace(ASOUND + ".tmp", ASOUND)
-    log(f"==> ALSA output routed to {mac}")
+        os.fsync(f.fileno())  # same power-cut hole as _persist_mac
+    os.replace(tmp, ASOUND)
+
+
+def _route_alsa(mac):
+    """Point the vibb_bt ALSA device at this headset (vibb_local for
+    the HAT speaker is kept alongside). Under pipewire the pcm NAMES stay
+    and each is pinned to a node DISCOVERED from the graph (never
+    composed: the name shape is a PipeWire version detail); the colon
+    MAC stays in the file so the idempotence check below still works,
+    and a node rename (package upgrade) rewrites exactly once."""
+    from vibb import audio  # lazy: keeps the cli path import-light
+    bt_node = None
+    if audio.stack() == "pipewire":
+        bt_node, local_node = audio.resolve_route(mac)
+        if bt_node is None:
+            log(f"==> no PipeWire sink node for {mac} yet — route not rewritten")
+            return
+        text = audio.asound_text(mac, bt_node, local_node)
+    else:
+        text = _bluealsa_asound_text(mac)
+    try:
+        with open(ASOUND) as f:
+            cur = f.read()
+        # idempotence is per FORMAT: a rollback to bluealsa found the MAC in
+        # the PipeWire text ("# bt speaker <MAC>") and left both pcms pointing
+        # at a masked server — a silent box on both outputs (AM-95 (1))
+        marker = "type pipewire" if bt_node else "type bluealsa"
+        if mac in cur and marker in cur and (bt_node is None or bt_node in cur):
+            return
+    except OSError:
+        pass
+    write_asound(text)
+    log(f"==> ALSA output routed to {mac}"
+        + (f" (node {bt_node})" if bt_node else ""))
     # The new vibb_bt->MAC mapping only matters to a RUNNING go-librespot
     # if bt is its CURRENT output — then reopen it live (v0.0.7) so ALSA
     # re-reads asound.conf and picks up the new headset with no restart and
@@ -476,10 +525,38 @@ pcm.vibb_local {{
         log("==> go-librespot output reopened live on the new headset")
         return
     log("==> restarting go-librespot to apply the new route...")
-    _run(["systemctl", "restart", "go-librespot"], timeout=30)
+    _run(go_unit_cmd("restart"), timeout=30)
     # tell the daemon's dead-device rebuild this reconnect already got a
     # fresh go-librespot — so it doesn't bounce it a second time
     note_go_restart()
+
+
+def route():
+    """install.sh's `bt.py route`: (re)write asound.conf for the current
+    stack from the remembered speaker. Under pipewire the HAT pcm must be
+    pinned even with no speaker paired, and an unpaired vibb_bt pins a
+    node that cannot exist (fails closed at hw_params) instead of the
+    old plug->null placeholder that silently 'plays'. Under bluealsa
+    install.sh owns the placeholder; with a MAC this is today's rewrite."""
+    from vibb import audio
+    try:
+        mac = open(MAC_FILE).read().strip()
+    except OSError:
+        mac = ""
+    if audio.stack() != "pipewire":
+        if mac:
+            _route_alsa(mac)
+        return True
+    bt_node, local_node = audio.resolve_route(mac or None, tries=5)
+    if mac and bt_node is None:
+        log(f"==> speaker {mac} has no sink node right now — vibb_bt pinned "
+            "to an unresolved name until it connects")
+    if local_node is None:
+        log("==> no HAT sink node — is WirePlumber up and the HAT enabled?")
+    write_asound(audio.asound_text(mac, bt_node, local_node))
+    log(f"==> asound.conf written for pipewire (bt {bt_node or '-'}, "
+        f"local {local_node or '-'})")
+    return True
 
 
 def pair_auto(name_filter=None):
@@ -666,7 +743,8 @@ def bt_scan():
 
 # commands that touch the radio hold the cross-process lock
 _RADIO_CMDS = {"connect", "use", "forget", "disconnect", "ensure",
-               "reconnect", "recover", "scan", "scan-raw", "visible"}
+               "reconnect", "recover", "scan", "scan-raw", "visible",
+               "route"}  # route: the asound.conf writer lock (AM-10)
 
 
 def main():
@@ -726,6 +804,8 @@ def main():
             return 2
     if cmd == "recover":
         return 0 if recover() else 1
+    if cmd == "route":
+        return 0 if route() else 1
     print(__doc__.split("CLI", 1)[1], file=sys.stderr)
     return 1
 

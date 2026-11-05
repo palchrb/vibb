@@ -39,11 +39,12 @@
 #   SKIPPED there; AM-1/AM-2 are systemd facts, verify them on a flash.
 #
 # Knobs (env):
-#   WP_ROLES=a2dp_sink       bluez5.roles value under test. The plan
-#                            wrote a2dp_source (host-centric guess);
-#                            PipeWire names roles after the PEER, so
-#                            a2dp_sink is the default here. S4 says
-#                            which one produces bluez_output.* nodes.
+#   WP_ROLES=a2dp_source     bluez5.roles value. Registration is
+#                            LOCAL-centric (endpoint_should_be_registered
+#                            gates on the SOURCE direction = a2dp_source);
+#                            AM-35's a2dp_sink registered only the
+#                            phone->box endpoint (first Zero 2026-09-05,
+#                            AM-57 in pi/audio-stack.sh).
 #   WP_PROFILE=main-embedded WirePlumber 0.5.8 SHIPS it: main +
 #                            mixin.systemwide-session (no logind/seat/
 #                            reserve-device/portal) + mixin.stateless
@@ -65,7 +66,7 @@ PW_USER=pipewire
 RUN=/run/pipewire
 SOCK="$RUN/pipewire-0"
 STATE=/var/lib/vibb
-WP_ROLES="${WP_ROLES:-a2dp_sink}"
+WP_ROLES="${WP_ROLES:-a2dp_source}"
 WP_DISABLE_HOOKS="${WP_DISABLE_HOOKS:-1}"   # bench 2026-09-03: REQUIRED (targetless linked to default without it) and safe
 WP_PROFILE="${WP_PROFILE:-main-embedded}"
 BT_MAC="${BT_MAC:-}"
@@ -246,7 +247,7 @@ EOF
   ok "wrote pipewire.socket pipewire.service wireplumber.service"
   fi
 
-  say "config fragments (plan §B on profile '$WP_PROFILE', AM-17 hw-volume=true, roles=$WP_ROLES, hooks-disable=$WP_DISABLE_HOOKS)"
+  say "config fragments (plan §B on profile '$WP_PROFILE', hw-volume defaulted, roles=$WP_ROLES, hooks-disable=$WP_DISABLE_HOOKS)"
   mkdir -p /etc/pipewire/pipewire.conf.d /etc/pipewire/client.conf.d /etc/wireplumber/wireplumber.conf.d
   cat > /etc/pipewire/pipewire.conf.d/10-vibb.conf <<'EOF'
 context.properties = {
@@ -306,7 +307,8 @@ monitor.bluez.properties = {
   bluez5.codecs             = [ sbc ]
   bluez5.enable-sbc-xq      = false
   bluez5.enable-msbc        = false
-  bluez5.enable-hw-volume   = true
+  # enable-hw-volume deliberately absent: it is a quirk-list override, and
+  # 1.4.2's DEFAULT_HW_VOLUME_PROFILES already covers A2DP_SINK (AM-35)
   bluez5.dummy-avrcp-player = false
   bluez5.default.rate       = 44100
 }
@@ -475,9 +477,10 @@ cmd_test() {
   say "S1a: settings names the plan uses (wpctl settings)"
   local s; s=$(wpctl settings 2>/dev/null || true)
   for k in linking.allow-moving-streams linking.follow-default-target node.stream.restore-props node.stream.restore-target device.restore-profile device.restore-routes bluetooth.autoswitch-to-headset-profile bluetooth.use-persistent-storage; do
-    if printf '%s' "$s" | grep -q "$k"; then ok "$(printf '%s' "$s" | grep "$k" | head -1 | sed 's/^ *//')"; else bad "$k NOT a known setting — fix the fragment name"; fi
+    # 0.5.8 prints "- Name: <key>" then "  Value: <v>" on the next line
+    if printf '%s' "$s" | grep -q "Name: $k"; then ok "$k = $(printf '%s' "$s" | grep -A1 "Name: $k" | grep -oE 'Value: .*' | head -1 | cut -c8-)"; else bad "$k NOT a known setting — fix the fragment name"; fi
   done
-  printf '%s' "$s" | grep -qiE 'follow-default-target[^a-z]*false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
+  printf '%s' "$s" | grep -A1 'Name: linking.follow-default-target' | grep -qiE 'Value: *false' && verdict PASS s1a_settings || verdict CHECK s1a_settings
 
   # ===================== S3c: crash survival (AM-1 / AM-2) =====================
   say "S3c: kill -9 pipewire — socket path must survive, wireplumber must come back"
@@ -609,6 +612,9 @@ cmd_trixie_bootstrap() {
     say "stopping + masking the HOST session PipeWire of '$u' (it owns the cards + BT endpoint)"
     user_ctl "$u" stop wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null
     user_ctl "$u" mask wireplumber pipewire-pulse pipewire pipewire.socket pipewire-pulse.socket 2>/dev/null && ok "masked ('trixie-clean' unmasks)"
+    bad "HOST AUDIO IS OFF until 'trixie-clean' — a mask survives reboots. On Bookworm"
+    note "every client (RetroPie, ALSA 'default') goes through this PipeWire, so"
+    note "the whole desktop is silent while the container owns the cards."
   fi
   note "next: $0 trixie-shell"
 }
@@ -616,6 +622,8 @@ cmd_trixie_bootstrap() {
 cmd_trixie_shell() {
   need_root
   [ -x "$CT/usr/bin/wireplumber" ] || { bad "no container at $CT — run trixie-bootstrap"; return 1; }
+  # a container left behind (closed terminal, no `exit`) keeps the tree busy
+  machinectl terminate vibb-trixie 2>/dev/null && { note "terminated a leftover vibb-trixie container"; sleep 2; }
   say "entering $CT (host /dev/snd, /run/udev, system D-Bus bound in; VIBB_RIG_MODE=procs)"
   note "inside:  cd /rig && ./$(basename "$0") check && ./$(basename "$0") install && ./$(basename "$0") start && ./$(basename "$0") test"
   exec systemd-nspawn -D "$CT" --machine=vibb-trixie --resolv-conf=copy-host \

@@ -161,7 +161,9 @@ WIFI_LOCK = threading.Lock()  # one scan/connect at a time
 HOTSPOT_CON = "vibb-hotspot"
 HOTSPOT_SSID = os.environ.get("VIBB_HOTSPOT_SSID") \
     or f"Vibb-{socket.gethostname()}"
-HOTSPOT_PSK = os.environ.get("VIBB_HOTSPOT_PSK", "vibb123")
+# WPA-PSK is 8..63 chars: the old default 'vibb123' (7) made nmcli refuse
+# every hotspot with "is not valid WPA PSK" (first Zero boot 2026-09-05)
+HOTSPOT_PSK = os.environ.get("VIBB_HOTSPOT_PSK", "vibb1234")
 WATCHDOG_DELAY_S = int(os.environ.get("VIBB_WIFI_WATCHDOG_DELAY", "45"))
 # wifi auto-off: a disconnected wpa_supplicant scan-loops constantly
 # (~10-20mA — 5-10% of playback draw); after wifi_auto_off_min without a

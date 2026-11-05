@@ -465,9 +465,10 @@ cache before a trip. Design, honest about its one hinge:
 - The list already exists: the library's per-entry `cache: N` field is
   the same contract today's sweep uses; warming is a new branch in the
   cache sweeper for soloist-routed entries.
-- Gating inherited from the sweep/backup culture: charger + idle +
-  REAL home wifi only (never the hotspot — warming over the metered
-  link pays the bill the cache exists to avoid); any button press
+- Gating — SUPERSEDED 2026-09-04 by PLAN-pipewire-soloist.md D3: warming
+  fires on library ADD, on ANY wifi (hotspot included — owner's call),
+  gated only on "no active A2DP playback"; charger/idle/home-wifi are
+  gone. Kept from here: any button press
   aborts instantly (warming is always the side that can wait); a
   warming-marker so idle.py does not read it as kid-activity and hold
   the box awake — the warming window carries its own time budget.

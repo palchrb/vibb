@@ -225,6 +225,7 @@ async function pollStatus() {
     const artists = (st.spotify && st.spotify.playing
       ? (st.spotify.artists || []).join(", ") : "");
     const offline = st.spotify_offline && st.source === "spotify";
+    renderSpotifyState(st.spotify_state);
     $("#np-sub").textContent = offline
       ? "No internet — Spotify reconnects when it's back"
       : artists || (st.source ? `source: ${st.source}` : "");
@@ -768,6 +769,75 @@ async function loadStorytelStatus() {
   }
 }
 
+// The Spotify engine's own state (soloistd: needs-key | needs-pair |
+// expired | bad-key | audio-unbound | offline | ok). The key form only
+// exists for the soloist engine — go-librespot boxes never show it.
+const SPOTIFY_STATE_TEXT = {
+  "needs-key": "Needs a Soloist API key — paste it below.",
+  "bad-key": "Spotify rejected the API key — paste a new one.",
+  "needs-pair": "Key saved. Pick the box under Devices in the Spotify app to pair.",
+  "expired": "Spotify's build has expired — the box is fetching a new one.",
+  "audio-unbound": "Spotify could not bind its audio output — check the audio stack.",
+  "offline": "No internet — Spotify reconnects when it's back.",
+};
+function renderSpotifyState(state) {
+  const p = $("#spotify-state");
+  if (!p) return;
+  const text = SPOTIFY_STATE_TEXT[state];
+  p.hidden = !text;
+  p.textContent = text || "";
+  // The key form shows for the soloist engine only: it is the one that
+  // reports the key states. Remembered, so a green 'ok' keeps it reachable.
+  if (state && state !== "ok" && state !== "offline") p.dataset.soloist = "1";
+  const show = p.dataset.soloist === "1";
+  if ($("#soloist-key-form")) $("#soloist-key-form").hidden = !show;
+  if ($("#soloist-key-help")) $("#soloist-key-help").hidden = !show;
+  if ($("#soloist-pair")) $("#soloist-pair").hidden = state !== "needs-pair";
+  if ($("#soloist-update")) $("#soloist-update").hidden = state !== "expired";
+}
+
+if ($("#btn-soloist-update")) {
+  $("#btn-soloist-update").addEventListener("click", async () => {
+    try {
+      const r = await api("/soloist/update", { method: "POST" });
+      toast(r.kicked ? "Fetching the new Spotify build…" : "Already fetching — give it a minute", 6000);
+    } catch (e) { toast(e.message, 8000); }
+  });
+}
+
+if ($("#btn-soloist-pair")) {
+  $("#btn-soloist-pair").addEventListener("click", async () => {
+    try {
+      await api("/soloist/pair", { method: "POST" });
+      toast("Open the Spotify app on this Wi-Fi and pick the box under Devices", 10000);
+    } catch (e) { toast(e.message, 8000); }
+  });
+}
+
+if ($("#soloist-key-form")) {
+  $("#soloist-key-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const key = $("#soloist-key").value.trim();
+    if (!key) { toast("Paste the API key first"); return; }
+    /* Shown ONCE, locally, before it leaves the phone: the box stores it
+       0600 and never sends it back over the LAN (the backup page's rule). */
+    if (!confirm("Save this key in your password manager now:\n\n  " + key
+                 + "\n\nThe box keeps it but never shows it again. Use this key?")) return;
+    try {
+      await api("/soloist/configure", { method: "POST", body: { api_key: key } });
+      $("#soloist-key").value = "";
+      toast("Key saved — Spotify engine restarting");
+    } catch (e) { toast(e.message, 8000); }
+  });
+  $("#btn-soloist-key-forget").addEventListener("click", async () => {
+    if (!confirm("Forget the Soloist API key? Spotify stops until a new one is saved.")) return;
+    try {
+      await api("/soloist/configure", { method: "POST", body: { api_key: "" } });
+      toast("Key forgotten");
+    } catch (e) { toast(e.message, 8000); }
+  });
+}
+
 if ($("#storytel-form")) {
   $("#storytel-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -924,7 +994,6 @@ async function loadSettings() {
   $("#set-screen").value = String(s.screen_timeout_s);
   $("#set-brightness").value = String(s.screen_brightness);
   $("#set-cap").value = String(s.volume_cap);
-  $("#set-localcap").value = String(s.local_fallback_cap);
   $("#set-idle").value = String(s.idle_shutdown_min);
   $("#set-spotcache").value = String(s.spotify_cache_gb);
   $("#set-bitrate").value = String(s.spotify_bitrate || 160);
@@ -938,7 +1007,6 @@ async function loadSettings() {
 for (const [id, key] of [["#set-screen", "screen_timeout_s"],
                          ["#set-brightness", "screen_brightness"],
                          ["#set-cap", "volume_cap"],
-                         ["#set-localcap", "local_fallback_cap"],
                          ["#set-idle", "idle_shutdown_min"],
                          ["#set-spotcache", "spotify_cache_gb"],
                          ["#set-bitrate", "spotify_bitrate"],

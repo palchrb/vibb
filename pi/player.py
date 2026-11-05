@@ -48,8 +48,10 @@ for _p in (_HERE, "/usr/local/lib/vibb-py"):
             sys.path.insert(0, _p)
         break
 from vibb import content, mpv as _mpv, radio, spotify  # noqa: E402
-from vibb.output import audio_ready, local_volume  # noqa: E402
-from vibb.paths import STATE_DIR, read_settings  # noqa: E402
+from vibb.output import OUTPUT_PCMS, audio_ready, local_volume  # noqa: E402
+from vibb import paths
+from vibb.paths import (STATE_DIR, go_unit_cmd, note_go_restart,  # noqa: E402
+                        read_settings)
 
 is_spotify = spotify.is_spotify
 POLL_S = 3
@@ -162,12 +164,20 @@ SPOT_RESUME_MIN_MS = 20000
 def _apply_box_volume():
     """One volume knob across sources: mpv reads volume.json at every
     start — give go-librespot the same treatment, else it keeps whatever
-    its previous session used and Spotify plays louder/softer than NRK."""
+    its previous session used and Spotify plays louder/softer than NRK.
+
+    Capped for the HAT exactly like a fresh mpv is (local_volume): the
+    headphone level a parent set is a room-filling level on the amplifier,
+    and until 2026-09-02 Spotify was the one source that reached the HAT
+    UNCAPPED (NEW-1) — every such landing had a person pressing something,
+    which is the only reason it never bit. Applied at use, never written
+    back, so volume.json keeps meaning "what the user chose"."""
     try:
         with open(os.path.join(STATE_DIR, "volume.json")) as f:
             v = max(0, min(100, round(json.load(f)["volume"])))
     except (OSError, ValueError, KeyError, TypeError):
         return  # never set through the box yet — leave as is
+    v = local_volume(v, read_settings().get("volume_cap", 100))
     try:
         steps = spotify.status().get("volume_steps") or 65535
         spotify.go("/player/volume", body={"volume": round(v * steps / 100)})
@@ -197,6 +207,21 @@ def accept_spot_bookmark(bm, uri, exact=False):
     if not bm.get("uri"):
         log("bookmark has no track uri — clean start")
         return None
+    if paths.GO_UNIT == "vibb-soloistd":
+        # AM-75: the list remembered from its last start (soloistd, from disk,
+        # instant) — a bookmark for a track no longer in it would send the
+        # resume walk skipping 300 times and landing at random
+        try:
+            d = spotify.context_tracks(uri, timeout=2, settle_s=0) or {}
+            known = [t.get("uri") for t in (d.get("tracks") or [])]
+            # only a list proven COMPLETE may reject: after one play the store
+            # holds a single ~20-row window, and a bookmark at row 40 read as
+            # "no longer in the list" — a clean start from row 0 (AM-95 (6))
+            if known and d.get("complete") and bm["uri"] not in known:
+                log(f"bookmark track {bm['uri']} is no longer in the list — clean start")
+                return None
+        except (OSError, ValueError):
+            pass
     if not exact and (bm.get("position") or 0) <= SPOT_RESUME_MIN_MS:
         log(f"bookmark position {int((bm.get('position') or 0) / 1000)}s "
             f"is early — keeping the track, playing it from 0:00")
@@ -206,6 +231,56 @@ def accept_spot_bookmark(bm, uri, exact=False):
 
 # first /player/play timeout: see the retry comment in play_spotify
 PLAY_TIMEOUT_S = float(os.environ.get("VIBB_SPOT_PLAY_TIMEOUT", "8"))
+# how long an ACCEPTED play may take to land before it counts as failed
+# (a cold fetch on the cabin hotspot is seconds; a dead one says
+# `stopped` long before this), and the shorter grace after a request
+# the client gave up on (the old 3 x 2 s "did it land anyway" loop)
+PLAY_LAND_S = float(os.environ.get("VIBB_SPOT_PLAY_LAND", "8"))
+PLAY_LAND_TIMEOUT_S = float(os.environ.get("VIBB_SPOT_PLAY_LAND_TIMEOUT", "6"))
+PLAY_LAND_POLL_S = 0.5
+
+
+def _play_landed(want, pre_uri, budget_s):
+    """Poll /status until the play LANDED: a track with the load over
+    (`buffering` off) — the bookmark's own uri when resuming, otherwise
+    any track that is not simply the one that was already loaded
+    (unless a load was seen in between, or it stands at the top: a
+    same-context replay lands on the same uri, from 0:00). False when
+    the fork says `stopped` on
+    two consecutive reads (v0.2.4: a failed load reads stopped — one
+    read is not trusted, the very first status after the reply may
+    still be between the resolve and the load's bookkeeping) or the
+    budget runs out. An unreachable api (busy chewing) answers {} from
+    spotify.status and is waited out, not counted."""
+    deadline = time.monotonic() + budget_s
+    seen_loading = False
+    stopped_reads = 0
+    while True:
+        try:
+            st = spotify.status(timeout=2)
+        except OSError:
+            st = None
+        if st:
+            track = st.get("track") or {}
+            if track and not st.get("buffering"):
+                uri = track.get("uri")
+                if want:
+                    if uri == want:
+                        return True
+                elif uri != pre_uri or seen_loading \
+                        or (track.get("position") or 0) < 2000:
+                    return True
+            if st.get("buffering") or not track:
+                seen_loading = True
+            if st.get("stopped") and not st.get("buffering"):
+                stopped_reads += 1
+                if stopped_reads >= 2:
+                    return False
+            else:
+                stopped_reads = 0
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(PLAY_LAND_POLL_S)
 
 
 def play_spotify(target, fresh=False, exact=False, start_uri=None,
@@ -248,6 +323,12 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
         log("go-librespot session never came up — check: journalctl -u go-librespot")
         sys.exit(1)
 
+    # The cap has to land BEFORE audio starts: applied only after
+    # /player/play (below, kept as belt) it left the first 0.5-2s of every
+    # Spotify landing on the HAT at headphone level (QA 2026-09-02, AM-13).
+    _apply_box_volume()
+    _wait_sink(output_pcm())  # pipewire: same fail-closed rule as mpv
+
     body = {"uri": uri}
     if start_uri:
         body["skip_to_uri"] = start_uri
@@ -276,50 +357,143 @@ def play_spotify(target, fresh=False, exact=False, start_uri=None,
     # deadline exceeded' in go-librespot's log) — retry instead of dying.
     # 8s, not 15: when the server has genuinely failed the retry lands on
     # a WARM context in ~1s (field 2026-07-18 20:04: 15s wait, then a 1s
-    # retry), so failing fast wins. But an aborted request usually KEEPS
-    # executing inside go-librespot — so before re-POSTing (which would
-    # reload the whole context behind it), check whether it landed.
+    # retry), so failing fast wins. Since fork v0.2.3 the reply says less
+    # than it did: /player/play answers once the context is RESOLVED,
+    # and the track load, the bookmark seek and the resume land BEHIND
+    # it (v0.2.2 blocked until all of it had) — so a 200 proves nothing
+    # audible yet. Every attempt therefore ends in the same landing poll
+    # (_play_landed), which also answers the old question for a request
+    # the client gave up on: it usually KEEPS executing server-side, and
+    # re-POSTing over a live one used to reload the whole context behind
+    # it. The v0.2.3 loader drops a superseded load cleanly, so a retry
+    # over a genuinely dead attempt is safe. A 409 means a NEWER command
+    # (a second tap, the phone) owns playback: nothing to retry.
     pre_uri = None
     try:
         pre_uri = (spotify.status(timeout=2).get("track") or {}).get("uri")
     except OSError:
         pass
+    want = bm["uri"] if bm else None
     last_err = None
     for attempt in range(3):
         try:
             spotify.go("/player/play", timeout=PLAY_TIMEOUT_S, body=body)
             last_err = None
-            break
         except OSError as e:
+            if getattr(e, "code", None) == 409:
+                log("play superseded by a newer command — leaving it be")
+                last_err = None
+                break
             last_err = e
-            for _ in range(3):  # did the timed-out request land anyway?
-                try:
-                    tr = (spotify.status(timeout=2).get("track")
-                          or {}).get("uri")
-                except OSError:
-                    time.sleep(2)  # api busy = still chewing on it
-                    continue
-                if tr and (tr == bm["uri"] if bm else tr != pre_uri):
-                    last_err = None
-                    log(f"play attempt {attempt + 1} timed out but "
-                        "landed — continuing")
-                break
-            if last_err is None:
-                break
-            log(f"play attempt {attempt + 1} failed ({e}) — retrying in 1s")
-            time.sleep(1)
+        if _play_landed(want, pre_uri, PLAY_LAND_S if last_err is None
+                        else PLAY_LAND_TIMEOUT_S):
+            if last_err is not None:
+                log(f"play attempt {attempt + 1} timed out but "
+                    "landed — continuing")
+            last_err = None
+            break
+        if last_err is None:
+            last_err = RuntimeError("accepted, but nothing landed")
+        log(f"play attempt {attempt + 1} failed ({last_err}) — retrying in 1s")
+        time.sleep(1)
     if last_err is not None:
-        log(f"go-librespot API unreachable ({last_err}) — check: journalctl -u go-librespot")
+        log(f"go-librespot could not start playback ({last_err}) — check: journalctl -u go-librespot")
         sys.exit(1)
     log(f"spotify: playing {uri}"
         + (f" (resuming {bm['uri']} at {bm['position'] // 1000}s)" if bm else ""))
     _apply_box_volume()
 
-    time.sleep(2)
     track = spotify.status().get("track") or {}
     if track.get("name"):
         artists = ", ".join(track.get("artist_names") or [])
         log(f"now playing: {track['name']} — {artists}")
+
+
+PAUSE_CONFIRM_S = float(os.environ.get("VIBB_PAUSE_CONFIRM_S", "2.5"))
+
+
+def _wait_sink(pcm):
+    """pipewire only: a pcm pinned to an absent node fails at hw_params,
+    and the node can lag the transport (BT) or WirePlumber's start (the
+    HAT, first tap after a reboot — NEW-3). Wait a bounded moment, then
+    FAIL CLOSED with EX_TEMPFAIL: the daemon's healer respawns exactly
+    when the node exists and never charges rc 75 to its crash budget
+    (AM-9). Never 'spawn anyway' — that is the advance storm."""
+    from vibb import audio
+    if audio.stack() != "pipewire":
+        return
+    from vibb import bt as _bt
+    output = "local" if pcm == OUTPUT_PCMS["local"] else "bt"
+    try:
+        mac = open(_bt.MAC_FILE).read().strip()
+    except OSError:
+        mac = ""
+    deadline = time.monotonic() + audio.SINK_WAIT_S
+    while True:
+        if audio.sink_ready(output, mac):
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    log(f"no PipeWire sink node for {pcm} after {audio.SINK_WAIT_S:.0f}s — "
+        f"not starting (exit {audio.SINK_WAIT_EXIT}; the daemon retries "
+        "when it appears)")
+    sys.exit(audio.SINK_WAIT_EXIT)
+
+
+def _spotify_down(e):
+    """A refused connection is the one honest 'not running'. Everything
+    else — a read timeout, a reset mid-reply — is UNKNOWN: the API may be
+    wedged under a session that is still playing."""
+    return isinstance(getattr(e, "reason", e), ConnectionRefusedError)
+
+
+def _confirm_spotify_paused(budget_s=PAUSE_CONFIRM_S):
+    """Pause Spotify and CONFIRM it before mpv starts.
+
+    bluealsa's exclusive pcm used to be the real guarantee against two
+    sources: a pause that never landed simply met 'Device busy'. PipeWire
+    MIXES, so a go-librespot whose API is wedged in a timeout storm (the
+    crash memory's self-heal gap, 2026-08-10) would keep PLAYING under the
+    fresh mpv (NEW-2). So a timeout is 'unknown', never 'not playing':
+    keep asking inside the budget, then apply the deterministic medicine
+    the daemon uses for the same wedge — try-restart, --no-block because
+    the unit's ExecStartPre can wait 60s for DNS and this sits on the
+    tap-to-audio path — and note it for the daemon's restart dedup. Boot
+    warm-up costs nothing here: a fresh API answers 'no track' at once.
+    Returns True when Spotify is known not to be playing."""
+    deadline = time.monotonic() + budget_s
+    timeouts = 0
+    while True:
+        try:
+            spotify.go("/player/pause", timeout=1)  # don't talk over Spotify
+            st = spotify.status_strict(timeout=1)
+        except OSError as e:
+            if _spotify_down(e):
+                return True  # not running = not playing
+            timeouts += 1
+        else:
+            if not st.get("track") or st.get("paused") or st.get("stopped"):
+                return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+    if not timeouts:
+        log(f"spotify pause unconfirmed after {budget_s:.1f}s (API answers, "
+            "still playing) — spawning anyway")
+        return False
+    log(f"spotify pause unconfirmed after {budget_s:.1f}s (API timing out: "
+        "wedged) — restarting go-librespot")
+    try:
+        subprocess.run(go_unit_cmd("--no-block", "try-restart"), timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"go-librespot restart failed ({e!r})")
+    note_go_restart()   # the daemon's blip rebuild must not bounce it again
+    try:                # the restart stops audio either way; one last look
+        st = spotify.status_strict(timeout=1)
+    except OSError:
+        return True
+    return not st.get("track") or bool(st.get("paused"))
 
 
 def _count_fast_skip(fast_skips, dwell_s):
@@ -429,13 +603,7 @@ def main():
         if fresh:
             log("starting fresh — cleared remembered position")
 
-    try:
-        # short timeout: this blocks the mpv launch, and go-librespot can be
-        # slow to answer while it warms up right after boot — a paused
-        # session is nice-to-have, not worth stalling audio for
-        spotify.go("/player/pause", timeout=1)  # don't talk over Spotify
-    except OSError:
-        pass
+    _confirm_spotify_paused()  # never two sources: see the function
 
     # Queue planning. An explicit --episode (picked in a menu) wins over the
     # bookmark; otherwise resume: rotate the queue to the remembered episode.
@@ -540,8 +708,8 @@ def main():
     # of headphones do not share a scale — cap what reaches the amplifier
     # (never written back, so the headphone level survives).
     pcm = output_pcm()
-    volume = local_volume(
-        volume, pcm, read_settings().get("local_fallback_cap", 35))
+    volume = local_volume(volume, read_settings().get("volume_cap", 100))
+    _wait_sink(pcm)  # pipewire: the node must exist or this exits 75
     proc = subprocess.Popen(mpv_command(urls, volume, sock, pcm,
                                         paused=bool(start_pos)))
     terminated = []  # set when WE are told to stop (reboot/daemon restart)

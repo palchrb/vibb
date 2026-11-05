@@ -111,6 +111,32 @@ os.remove(route)
 assert radio.wifi_settled() is True
 print("9. missing operstate/route files fail open OK")
 
+# 10. AM-93 wifi_assoc_in_flight: the interface UP for NM to work on but
+#     no default route yet = the fragile window; 'down' = nobody has
+#     touched the radio, nothing to protect; missing files fail open
+def _oper(v):
+    with open(oper, "w") as f:
+        f.write(v + "\n")
+def _route(wlan):
+    with open(route, "w") as f:
+        f.write(HDR + ("wlan0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000"
+                       "\t0\t0\t0\n" if wlan else ""))
+_oper("down"); _route(False)
+assert radio.wifi_assoc_in_flight() is False, "down: NM has not started"
+_oper("dormant")
+assert radio.wifi_assoc_in_flight() is True, "dormant, no route: scanning/associating"
+_oper("up")
+assert radio.wifi_assoc_in_flight() is True, "up, no route: handshake/DHCP"
+_route(True)
+assert radio.wifi_assoc_in_flight() is False, "routed: settled"
+_oper("unknown"); _route(False)
+assert radio.wifi_assoc_in_flight() is True, "an admin-up interface of unknown state counts as in flight"
+os.remove(oper)
+assert radio.wifi_assoc_in_flight() is False, "no wlan0: nothing to protect"
+_oper("up"); os.remove(route)
+assert radio.wifi_assoc_in_flight() is False, "unreadable route table fails open"
+print("10. wifi_assoc_in_flight: down = free, up/dormant without a route = hold, routed = free OK")
+
 # 10. uptime: real /proc/uptime parses; a broken path fails to inf
 # (= never gate on it)
 assert radio.uptime() > 0

@@ -34,10 +34,10 @@ SETTING_SPECS = {
     "screen_brightness": (100, 10, 100),  # % backlight (min 10: never black)
     "idle_shutdown_min": (5, 0, 240),  # screen blanks at 30s; no reason to
                                        # burn the ~100mA idle floor for 30 min
+    # volume_cap: the ONE ceiling — on the knob and at every landing on every
+    # output (owner 2026-09-05; the built-in-only local_fallback_cap is gone,
+    # an old settings.json key is simply ignored)
     "volume_cap": (100, 30, 100),
-    # Ceiling for audio that lands on the BUILT-IN speaker, which shares
-    # one volume number with the headphones but not their scale. 0 = off.
-    "local_fallback_cap": (35, 0, 100),
     "spotify_cache_gb": (20, 1, 100),
     "spotify_bitrate": (160, 96, 320),  # further constrained to BITRATES
     # Continue what was playing when the box was switched off: -1 always
@@ -354,6 +354,15 @@ def _battery_runtime_tracker():
             log(f"battery runtime tracker error: {e!r}")
 
 
+def spotify_cache_dir():
+    """Where the Spotify engine keeps its audio cache: go-librespot's dir, or
+    soloistd's CacheDirectory under soloist (owner 2026-09-06: the PWA showed
+    no Spotify cache size at all on the soloist box)."""
+    if os.environ.get("VIBB_GO_UNIT", "go-librespot") == "vibb-soloistd":
+        return os.environ.get("VIBB_SOLOIST_CACHE_DIR", "/var/cache/vibb-soloist")
+    return os.environ.get("VIBB_GO_CACHE_DIR", "/var/lib/vibb/spotify-cache")
+
+
 def _dir_size(path):
     total = 0
     for root, _dirs, files in os.walk(path):
@@ -404,7 +413,7 @@ def system_status():
         pass
     caches = {}
     for name, p in (("podcasts", CACHE_DIR),
-                    ("spotify", "/var/lib/vibb/spotify-cache")):
+                    ("spotify", spotify_cache_dir())):
         if os.path.isdir(p):
             caches[name] = _dir_size_cached(p)
     temp = None

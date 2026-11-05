@@ -592,6 +592,7 @@ SEEK_TAP_S = 15.0       # a TAP, every tap, on every content type
 # (held longer than s, step becomes s-of-content). Travel rates at the
 # 0.35s repeat: ~43/129/343/857 s per held second.
 SEEK_HOLD_LADDER = ((1.5, 45.0), (4.0, 120.0), (8.0, 300.0))
+SONOS_SCAN_WAIT_S = 4.0  # an SSDP round is ~3s: re-read the list once after it
 SEEK_POST_MIN_S = 0.7   # single-flight poster pacing: the bar compounds
 #                         per repeat, the NETWORK sees at most ~1.4/s
 SEEK_TAIL_S = 5.0       # mirror of the daemon's end clamp — without it
@@ -1406,7 +1407,7 @@ class App:
         self.sonos = {"players": []}  # cached speaker list (menu gating)
         self.bt_found = []
         self.settings = {"screen_timeout_s": 30, "idle_shutdown_min": 30,
-                         "volume_cap": 100, "local_fallback_cap": 35}
+                         "volume_cap": 100}
         self.volume_flash = 0.0     # show volume overlay until this time
         self.volume_shown = None
         self.vol_mode_until = 0.0   # while set: a card is up and owns B/Y
@@ -2570,12 +2571,30 @@ class App:
                 try:
                     self.sonos = api_get("/sonos?fresh=1", timeout=8)
                     self.dirty = True
+                    if self.sonos.get("scanning"):
+                        # nobody answered (the cabin): the sidecar is
+                        # running one SSDP round — read the list once more
+                        # when it is done, so the new rooms appear while
+                        # the menu is still open (owner 2026-09-05)
+                        time.sleep(SONOS_SCAN_WAIT_S)
+                        self.sonos = api_get("/sonos")
+                        self.dirty = True
                 except OSError:
                     pass  # cache stays on screen; Look again exists
             threading.Thread(target=freshen, daemon=True).start()
             self.push("output")
             self.dirty = True
         else:
+            # empty cache: today's two-way toggle, unchanged for the kid —
+            # and ONE scan behind it (the sidecar's fresh=1 falls through
+            # to SSDP when nobody can be asked), so a box that has Sonos
+            # shows the menu from the NEXT hold, never needing ssh
+            def scan():
+                try:
+                    api_get("/sonos?fresh=1", timeout=8)
+                except OSError:
+                    pass
+            threading.Thread(target=scan, daemon=True).start()
             self._toggle_output()
 
     def select_output(self):
@@ -2765,8 +2784,6 @@ class App:
             return [("Screen off after", self.fmt_timeout(s["screen_timeout_s"])),
                     ("Brightness", f"{s.get('screen_brightness', 100)}%"),
                     ("Volume cap", f"{s['volume_cap']}%"),
-                    ("Speaker limit",
-                     f"{s.get('local_fallback_cap', 35) or 'off'}"),
                     ("Auto-off (idle)", self.fmt_idle(s["idle_shutdown_min"])),
                     ("Browse", {0: "menus", 1: "carousel",
                                 2: "categories"}.get(
@@ -2883,8 +2900,6 @@ class App:
         cycles = {"Screen off after": ("screen_timeout_s", [15, 30, 60, 0]),
                   "Brightness": ("screen_brightness", [25, 50, 75, 100]),
                   "Volume cap": ("volume_cap", [60, 70, 80, 90, 100]),
-                  "Speaker limit": ("local_fallback_cap",
-                                    [0, 20, 35, 50, 70]),
                   # 5 first: it is the shipped default, and its absence
                   # meant ONE trip through this cycle lost the 5-min
                   # setting for good (QA power audit 2026-08-10)
@@ -3357,7 +3372,10 @@ class App:
                 title, rolls = marquee(title, 20,
                                        t0=self._marquee_t0("now", title))
             d.text((W // 2, ty), title, font=F_MED, fill=FG, anchor="ma")
-            sub = ", ".join((st.get("spotify") or {}).get("artists") or [])
+            # strings only: a bookmark written before the sidecar filtered
+            # nameless creators still carries a None (Zero 2026-09-05, twice)
+            sub = ", ".join(a for a in ((st.get("spotify") or {}).get("artists") or [])
+                            if isinstance(a, str) and a)
             if sub:
                 d.text((W // 2, ty + 22), sub[:30], font=F_SMALL,
                        fill=DIM, anchor="ma")

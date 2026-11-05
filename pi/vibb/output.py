@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 
-from vibb.paths import STATE_DIR
+from vibb.paths import STATE_DIR, go_unit_cmd
 
 OUT_FILE = os.path.join(STATE_DIR, "output.json")
 GO_CONFIG = os.environ.get("VIBB_GO_CONFIG", "")  # go-librespot config.yml
@@ -19,24 +19,20 @@ def log(msg):
     print(f"vibbd: {msg}", flush=True)
 
 
-def local_volume(stored, pcm, cap):
-    """The volume to actually use, given where the sound is going.
+def local_volume(stored, cap):
+    """The volume to actually USE, on any output: min(stored, cap).
 
-    The built-in speaker and a pair of headphones do not share a scale,
-    and the box keeps ONE volume number. So the level a parent set for
-    a child's headphones — often near the top, they are quiet — becomes
-    a room-filling level the moment audio lands on the HAT's amplifier.
-    That matters because the speaker is what the box falls back to in
-    the dark, when a child has just pulled dead headphones off: the
-    loudest event this box can produce was, until now, the one action
-    it offers in exactly that moment.
+    Owner 2026-09-05: ONE cap for the box (`volume_cap`, the child-safety
+    ceiling the knob already obeys), applied at every landing on every
+    output — a live reopen onto the HAT, mpv's start, the pre-play volume
+    push. The separate built-in-speaker limit (`local_fallback_cap`) is
+    gone: with a cap on the knob AND on the landing, the headphones-die
+    -> speaker fallback lands at the box cap, never above it.
 
-    Cap it. Applied at USE, never written back (`_save_volume` is the
-    only writer and must keep meaning "what the user chose"), so the
-    headphone level is still there when the headphones come back.
-    cap=0 disables the whole thing.
+    Applied at USE, never written back (`_save_volume` is the only writer
+    and keeps meaning "what the user chose"). cap=0 disables.
     """
-    if not cap or pcm != OUTPUT_PCMS["local"]:
+    if not cap:
         return stored
     return min(stored, cap)
 
@@ -59,7 +55,7 @@ def resize_spotify_cache(gb):
     os.replace(GO_CONFIG + ".tmp", GO_CONFIG)
     log(f"spotify cache limit -> {gb}GB (restarting go-librespot)")
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — restart it manually")
 
@@ -87,7 +83,7 @@ def set_spotify_bitrate(kbps):
     os.replace(GO_CONFIG + ".tmp", GO_CONFIG)
     log(f"spotify bitrate -> {kbps} kbps (restarting go-librespot)")
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — restart it manually")
 
@@ -162,7 +158,7 @@ def _retarget_go_librespot(pcm):
     if not _write_audio_device(pcm):
         return False
     try:
-        subprocess.run(["systemctl", "restart", "go-librespot"], timeout=30)
+        subprocess.run(go_unit_cmd("restart"), timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"go-librespot restart failed ({e!r}) — config updated, "
             "restart it manually")
@@ -173,9 +169,20 @@ def _retarget_go_librespot(pcm):
 
 def audio_ready():
     """Is the active output able to make sound right now? BT speakers
-    drop out and reconnect; nobody should play into a void."""
+    drop out and reconnect; nobody should play into a void.
+
+    Under the PipeWire stack 'able' also means the SINK NODE exists: a
+    pcm pinned to an absent node fails at hw_params (bench 2026-09-03),
+    the BT transport precedes its node by milliseconds, and the HAT node
+    only exists once WirePlumber is up — the first tap after a reboot can
+    beat it (NEW-3). Answering False there keeps the crash healer from
+    burning its per-boot budget on 'server not up yet'."""
+    from vibb import audio as _audio
+    pipewire = _audio.stack() == "pipewire"
     if current_output()["output"] == "local":
-        return _i2s_card_present()
+        if not _i2s_card_present():
+            return False
+        return not pipewire or _audio.sink_ready("local")
     from vibb import bt as _bt, btbus
     try:
         mac = open(_bt.MAC_FILE).read().strip()
@@ -183,4 +190,6 @@ def audio_ready():
         return True  # no speaker configured — nothing to wait for
     if not mac:
         return True
-    return btbus.a2dp_pcm_present(mac)
+    if not btbus.a2dp_pcm_present(mac):
+        return False
+    return not pipewire or _audio.sink_ready("bt", mac)

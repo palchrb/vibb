@@ -17,7 +17,7 @@
 # doubles as an updater after git pull. Use --update to force re-downloading
 # go-librespot and upgrading the python libs.
 #
-# Usage:  sudo ./install.sh [--update]
+# Usage:  sudo ./install.sh [--update] [--bluealsa|--pipewire] [--librespot|--soloist]
 # After:  sudo ./play.sh connect
 #         sudo ./play.sh "https://open.spotify.com/track/..."
 
@@ -25,7 +25,36 @@ set -euo pipefail
 
 API_PORT=3678
 UPDATE=0
-[[ ${1:-} == "--update" ]] && UPDATE=1
+usage() {
+  cat <<'USAGE'
+usage: install.sh [--update] [--bluealsa|--pipewire] [--librespot|--soloist]
+
+  --update      re-install the python libs too (the slow path)
+  --bluealsa    audio stack: bare ALSA + bluealsa (default, today's box)
+  --pipewire    audio stack: PipeWire + WirePlumber, bluealsa masked
+                (rollback: re-run with --bluealsa)
+  --librespot   Spotify engine: the go-librespot fork (default)
+  --soloist     Spotify engine: Spotify's official headless client
+                (needs --pipewire; the soloistd sidecar is not built yet)
+
+Both toggles are also settable as VIBB_AUDIO_STACK / VIBB_SPOTIFY_ENGINE,
+and both are remembered in /etc/vibb/ so a bare re-run keeps your choice.
+USAGE
+}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --update)    UPDATE=1 ;;
+    --bluealsa)  VIBB_AUDIO_STACK=bluealsa ;;
+    --pipewire)  VIBB_AUDIO_STACK=pipewire ;;
+    --librespot) VIBB_SPOTIFY_ENGINE=golibrespot ;;
+    --soloist)   VIBB_SPOTIFY_ENGINE=soloist ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "install.sh: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+export VIBB_AUDIO_STACK="${VIBB_AUDIO_STACK:-}" VIBB_SPOTIFY_ENGINE="${VIBB_SPOTIFY_ENGINE:-}"
+
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run with sudo: sudo $0" >&2
@@ -56,6 +85,12 @@ RUN_USER="${SUDO_USER:-pi}"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 CONF_DIR="$RUN_HOME/.config/go-librespot"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The two install-time toggles (PLAN-pipewire-soloist.md): the audio
+# stack and the Spotify engine. The engine resolves FIRST and refuses
+# before anything is touched (soloist needs pipewire + the sidecar).
+. "$SCRIPT_DIR/audio-stack.sh"
+. "$SCRIPT_DIR/spotify-engine.sh"
+spotify_engine_resolve
 
 # --- helpers -----------------------------------------------------------------
 
@@ -119,7 +154,24 @@ PKGS=(bluez bluez-alsa-utils libasound2-plugin-bluez alsa-utils curl jq
                                            # picked. From apt, not a vendored
                                            # binary, so both get security
                                            # updates with everything else
-      python3-dbus python3-gi)             # BlueZ D-Bus backend (PLAN-bt-dbus.md)
+      python3-dbus python3-gi              # BlueZ D-Bus backend (PLAN-bt-dbus.md)
+      swig liblgpio-dev)                   # lgpio has no cp313 wheel, so pip
+                                           # builds it (swig + lg headers) —
+                                           # and not only in step 5's own lgpio
+                                           # line: Pi OS points pip at piwheels,
+                                           # whose Adafruit-Blinka wheel is built
+                                           # ON a Pi and therefore requires
+                                           # lgpio, RPi.GPIO, rpi_ws281x (PyPI's
+                                           # does not). The first Trixie box
+                                           # (2026-09-05) died there because
+                                           # these two came from a hidden apt
+                                           # call that had failed silently.
+# Audio stack (PLAN-pipewire-soloist.md): bluealsa (default) or pipewire.
+# The toggle lives in audio-stack.sh; bluealsa's packages stay in PKGS on
+# BOTH stacks — masked, never removed, so an offline rollback always works.
+audio_stack_resolve
+# shellcheck disable=SC2207
+PKGS+=($(audio_stack_packages))
 missing=()
 for p in "${PKGS[@]}"; do have_pkg "$p" || missing+=("$p"); done
 if ((${#missing[@]})); then
@@ -138,7 +190,7 @@ fi
 # track a kid replays is downloaded once instead of every time (bandwidth on
 # hotspots; NOT offline playback — the session and audio keys are still live).
 GO_LIBRESPOT_REPO="palchrb/go-librespot"
-GO_LIBRESPOT_VERSION="v0.2.2"  # v0.0.8 Fast skip: debounced next/prev (a
+GO_LIBRESPOT_VERSION="v0.2.4"  # v0.0.8 Fast skip: debounced next/prev (a
 # burst of N presses costs 2 audio-key requests instead of N) + a circuit
 # breaker on throttled keys (aes code 2 -> one retry + stop, never the
 # 51-track walk that kept the account rate-limited); /status gains
@@ -200,7 +252,23 @@ GO_LIBRESPOT_VERSION="v0.2.2"  # v0.0.8 Fast skip: debounced next/prev (a
 # about: bounded dealer/AP retry loops + player-close fixes (the
 # zombie-session family), skip_to_uri now finds tracks already in the
 # queue, bounded end-of-track advance, truncated-audio-key and
-# decryption-race fixes.
+# decryption-race fixes. v0.2.3: upstream realignment (37 commits) —
+# the player loop is rewritten around a loader lane (loads, prefetch,
+# context resolves and connect-state pushes run OFF the loop, bounded
+# and coalesced). Three surfaces moved and vibb follows them: (1) the
+# metadata cache is OPT-IN (`metadata.enabled`, below) — next_track
+# and GET /context/tracks (the song picker) 404 without it, and
+# `context_sweep` restores the whole-list sweep at context start;
+# (2) pending_track_uri is gone from /status — every load (a phone
+# skip's too) now reads track:null + buffering:true, which
+# spotify.loading() consumes; (3) POST /player/play answers once the
+# context is RESOLVED, the load/seek/resume land behind it, so
+# player.py polls for the landing instead of trusting the reply.
+# skip_debounce_ms default 800 -> 600 (still not pinned here). Removed
+# with no vibb caller: /connect/devices, /connect/transfer. v0.2.4:
+# pending_track is back (the load's target with metadata; its uri
+# stands in for pending_track_uri) and a FAILED load reads `stopped`
+# instead of buffering forever — what lets loading() trust buffering.
 GL_VERSION_FILE=/usr/local/bin/.go-librespot.version
 
 if [[ -x /usr/local/bin/go-librespot && $UPDATE -eq 0 \
@@ -227,6 +295,9 @@ fi
 # --- 3. configs --------------------------------------------------------------
 
 echo "==> [3/8] ALSA + go-librespot config..."
+# bluealsa only: under pipewire `audio_stack_route` (after the package
+# install below) writes asound.conf with both pcm names pinned to graph nodes.
+if [[ $AUDIO_STACK == bluealsa ]]; then
 # Placeholder ALSA device: play.sh rewrites this with your headset's MAC.
 if [[ ! -e /etc/asound.conf ]] || ! grep -q "bluealsa\|vibb_bt" /etc/asound.conf; then
   cat > /etc/asound.conf <<'EOF'
@@ -256,6 +327,7 @@ pcm.vibb_local {
 EOF
   echo "    added vibb_local pcm to /etc/asound.conf"
 fi
+fi  # bluealsa placeholder
 
 if [[ -f "$CONF_DIR/config.yml" ]]; then
   echo "    keeping existing $CONF_DIR/config.yml (delete it to regenerate)"
@@ -279,6 +351,15 @@ cache:
   enabled: true
   dir: /var/lib/vibb/spotify-cache
   size_limit: 20GB
+# v0.2.3: the track metadata cache is opt-in. It is what answers
+# next_track (the screen's next-cover prewarm), pending_track (the card
+# mid-skip) and GET /context/tracks (the hold-Y song picker) — 404
+# without it. context_sweep = fetch the whole list's metadata when a
+# context starts (the v0.1.0 behaviour), so the picker opens full and
+# the first skip already knows its cover.
+metadata:
+  enabled: true
+  context_sweep: true
 credentials:
   type: zeroconf
   zeroconf:
@@ -304,6 +385,18 @@ cache:
   size_limit: 20GB
 EOF
   echo "    config: enabled the audio cache (20GB, /var/lib/vibb/spotify-cache)"
+  GO_RESTART_NEEDED=1
+fi
+# Metadata cache (opt-in since fork v0.2.3) — see the config template above.
+if [[ -f "$CONF_DIR/config.yml" ]] && ! grep -q '^metadata:' "$CONF_DIR/config.yml"; then
+  cat >> "$CONF_DIR/config.yml" <<'EOF'
+# v0.2.3: opt-in metadata cache — next_track, pending_track and the
+# song picker's GET /context/tracks need it (404 without)
+metadata:
+  enabled: true
+  context_sweep: true
+EOF
+  echo "    config: enabled the metadata cache (song picker, next-cover prewarm)"
   GO_RESTART_NEEDED=1
 fi
 # The cache dir must be writable by the service user (go-librespot runs
@@ -468,10 +561,20 @@ then
   echo "    bluetooth: bluetoothd restarts itself after a crash (on-failure)"
 fi
 systemctl enable --now bluetooth.service
-# Debian bookworm ships the daemon as bluealsa.service; newer releases as bluealsad.service
-systemctl enable --now bluealsa.service 2>/dev/null \
-  || systemctl enable --now bluealsad.service
+# The audio stack: bluealsa's daemon (today) or the PipeWire system units —
+# and the rollback between them. Everything in audio-stack.sh.
+# A stack flip on a box in service (AM-95 (2)): the running daemon and
+# btwatchd hold the old stack's ALSA devices and would race the new one
+# (advance storm, bookmarks rewritten per track, the HAT opened directly).
+# Quiet them first; step 6 enables them again on the new stack.
+if [[ "$(audio_stack_recorded)" != "$AUDIO_STACK" ]]; then
+  echo "    audio stack $(audio_stack_recorded) -> $AUDIO_STACK: stopping vibb-daemon + vibb-bt-reconnect first"
+  systemctl stop vibb-daemon.service vibb-bt-reconnect.service 2>/dev/null || true
+fi
+audio_stack_apply
 
+BA_UNIT=""   # stays empty under pipewire (set -u: the block below reads it)
+if [[ $AUDIO_STACK == bluealsa ]]; then  # the keep-alive is a bluealsa knob
 # A2DP transport keep-alive: stock bluealsa tears the transport down the
 # instant the last PCM client closes ('keep-alive: 0 ms' in the journal),
 # so every switch to the built-in speaker and back — and every pause/play
@@ -483,10 +586,10 @@ systemctl enable --now bluealsa.service 2>/dev/null \
 # (0 disables). A live-but-silent transport keeps the radio out of sleep,
 # so this is a small standing battery cost — hence not maxed out.
 BT_KEEPALIVE="${VIBB_BT_KEEPALIVE:-120}"
-BA_UNIT=""
 for u in bluealsa.service bluealsad.service; do
   systemctl cat "$u" >/dev/null 2>&1 && BA_UNIT="$u" && break
 done
+fi
 if [[ -n $BA_UNIT ]]; then
   # first ExecStart= in systemctl cat is the distro unit's own line (our
   # drop-in, if present, appears after) — so re-runs read the base line
@@ -540,6 +643,7 @@ StartLimitBurst=6
 
 [Service]
 User=$RUN_USER
+$(audio_stack_unit_env)
 # network-online.target fires the instant NetworkManager 'finishes
 # starting' — before wlan0 has a DHCP lease AND before systemd-resolved
 # answers, so at boot go-librespot's first Spotify AP lookup hit a dead
@@ -623,15 +727,21 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-write_if_changed /etc/systemd/system/vibb-bt-reconnect.service <<'EOF' && RECON_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-bt-reconnect.service <<EOF && RECON_CHANGED=1
 [Unit]
 Description=Vibb BT reconnect daemon (event-driven, btwatchd)
-After=bluetooth.service bluealsa.service bluealsad.service
+# after whoever owns the A2DP endpoint (bluealsa, or WirePlumber under pipewire)
+After=bluetooth.service $(audio_stack_endpoint_units)
 Wants=bluetooth.service
 
 [Service]
 # Kill switch: systemctl edit vibb-bt-reconnect ->
 #   [Service] Environment=VIBB_BT_BACKEND=cli   (poll-loop fallback)
+$(audio_stack_unit_env)
+$(spotify_engine_unit_env)
+# the transport-gate shadow compare at 1/s here: _await_pcm polls 1/s for
+# <=10s per connect, so a <3s transport flicker is visible (AM-12c)
+Environment=VIBB_BT_GATE_SHADOW_S=1
 ExecStart=/usr/bin/python3 /usr/local/bin/vibb-btwatchd
 Restart=always
 RestartSec=5
@@ -660,9 +770,8 @@ if [[ $UPDATE -eq 1 ]] || ! /opt/vibb/venv/bin/python3 -c 'import adafruit_pn532
   # falls back to RPi.GPIO, whose edge detection is broken there
   # ('RuntimeError: Failed to add edge detection' from vibb-ui).
   # No prebuilt wheel for this python: pip builds from source, which
-  # needs swig + the lg library headers. Never abort the install on it.
+  # needs swig + the lg library headers (in PKGS). Never abort the install on it.
   if ! /opt/vibb/venv/bin/python3 -c 'import lgpio' 2>/dev/null; then
-    apt-get install -y -qq swig liblgpio-dev >/dev/null 2>&1 || true
     /opt/vibb/venv/bin/pip install --quiet --upgrade lgpio \
       || echo "    WARNING: lgpio build failed — vibb-ui buttons need it (apt install swig liblgpio-dev, then rerun)"
   fi
@@ -685,6 +794,10 @@ done
 rm -f /usr/local/bin/nrk.py
 # btwatchd imports vibb.bt — a package change must restart it too
 [[ $PKG_CHANGED -eq 1 ]] && RECON_CHANGED=1
+# asound.conf for the stack: pipewire pins both pcm names to graph nodes
+# (needs the package just installed and WirePlumber, up since step 4);
+# bluealsa is today's rewrite when a speaker is remembered.
+audio_stack_route
 
 RFID_CHANGED=$PKG_CHANGED
 install_if_changed 755 "$SCRIPT_DIR/rfid.py"   /usr/local/bin/vibb-rfid   && RFID_CHANGED=1
@@ -1102,12 +1215,13 @@ install_if_changed 755 "$SCRIPT_DIR/idle.py"  /usr/local/bin/vibb-idle  && IDLE_
 # (idle_shutdown_min, 0 = never) is the actual on/off knob and idle.py
 # re-reads it live. Previously this service was opt-in via
 # 'vibb-power idle-on', which made the PWA setting a silent no-op.
-write_if_changed /etc/systemd/system/vibb-idle.service <<'EOF2' && IDLE_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-idle.service <<EOF2 && IDLE_CHANGED=1
 [Unit]
 Description=Vibb idle auto-shutdown
 After=vibb-daemon.service
 
 [Service]
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-idle
 Restart=always
 RestartSec=30
@@ -1117,6 +1231,9 @@ WantedBy=multi-user.target
 EOF2
 
 SONOS_CHANGED=$PKG_CHANGED
+# The Spotify engine: go-librespot (today) or the soloistd sidecar — and
+# the rollback between them. Recorded only after a successful apply.
+spotify_engine_apply
 install_if_changed 755 "$SCRIPT_DIR/sonosd.py" /usr/local/bin/vibb-sonos && SONOS_CHANGED=1
 write_if_changed /etc/systemd/system/vibb-sonos.service <<'EOF2' && SONOS_CHANGED=1
 [Unit]
@@ -1152,7 +1269,9 @@ Description=Vibb orchestration daemon (playback state + API)
 # (systemd-analyze rig 2026-07-18: multi-user waited on network-online).
 
 [Service]
-Environment=VIBB_GO_CONFIG=$CONF_DIR/config.yml
+$(spotify_engine_go_config_env "$CONF_DIR/config.yml")
+$(spotify_engine_unit_env)
+$(audio_stack_unit_env)
 ExecStart=/usr/bin/python3 /usr/local/bin/vibb-daemon
 Restart=always
 RestartSec=5
@@ -1163,12 +1282,13 @@ EOF
 
 BTN_CHANGED=$PKG_CHANGED
 install_if_changed 755 "$SCRIPT_DIR/buttons.py" /usr/local/bin/vibb-buttons && BTN_CHANGED=1
-write_if_changed /etc/systemd/system/vibb-buttons.service <<'EOF' && BTN_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-buttons.service <<EOF && BTN_CHANGED=1
 [Unit]
 Description=Vibb media button daemon (AVRCP etc.)
 After=bluetooth.service
 
 [Service]
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-buttons
 Restart=always
 RestartSec=10
@@ -1179,13 +1299,14 @@ EOF
 
 # RFID daemon service (PN532). Installed but NOT enabled — enable it when
 # the reader is wired:  sudo systemctl enable --now vibb-rfid
-write_if_changed /etc/systemd/system/vibb-rfid.service <<'EOF' && RFID_CHANGED=1
+write_if_changed /etc/systemd/system/vibb-rfid.service <<EOF && RFID_CHANGED=1
 [Unit]
 Description=Vibb RFID daemon
-After=go-librespot.service
+After=$(spotify_engine_unit).service
 
 [Service]
 EnvironmentFile=-/etc/vibb/rfid.conf
+$(spotify_engine_unit_env)
 ExecStart=/opt/vibb/venv/bin/python3 /usr/local/bin/vibb-rfid
 Restart=always
 RestartSec=10
@@ -1263,7 +1384,10 @@ echo "==> [6/8] Enabling services (restarting only what changed)..."
 chmod 644 /etc/systemd/system/vibb-*.service \
   /etc/systemd/system/go-librespot.service 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable --now go-librespot.service vibb-bt-reconnect.service vibb-mpris.service \
+# the Spotify engine chosen by spotify_engine_apply — never go-librespot by
+# name: under --soloist it is masked, and enabling a masked unit fails
+# the whole call (and, under set -e, the install)
+systemctl enable --now "$(spotify_engine_unit).service" vibb-bt-reconnect.service vibb-mpris.service \
   vibb-buttons.service vibb-daemon.service vibb-idle.service \
   vibb-chargefollow.service vibb-sonos.service
 # One-time migration: earlier installs enabled vibb-rfid before the PN532
@@ -1277,7 +1401,7 @@ if [[ ! -f /var/lib/vibb/.rfid-opt-in ]]; then
     echo "      sudo systemctl enable --now vibb-rfid"
   fi
 fi
-[[ $GO_CHANGED -eq 1 || ${GO_RESTART_NEEDED:-0} -eq 1 ]] && { echo "    go-librespot changed — restarting"; systemctl restart go-librespot.service; }
+[[ $SPOTIFY_ENGINE == golibrespot && ( $GO_CHANGED -eq 1 || ${GO_RESTART_NEEDED:-0} -eq 1 ) ]] && { echo "    go-librespot changed — restarting"; systemctl restart go-librespot.service; }
 [[ $RECON_CHANGED -eq 1 ]] && { echo "    bt-reconnect changed — restarting"; systemctl restart vibb-bt-reconnect.service; }
 [[ ${MPRIS_CHANGED:-0} -eq 1 ]] && { echo "    mpris bridge changed — restarting"; systemctl restart vibb-mpris.service; }
 [[ $IDLE_CHANGED  -eq 1 ]] && { echo "    idle daemon changed — restarting"; systemctl restart vibb-idle.service; }
@@ -1310,6 +1434,18 @@ for _ in $(seq 1 20); do
   curl -sf "http://127.0.0.1:$API_PORT/status" >/dev/null && break
   sleep 1
 done
+
+# Under soloist there is no Connect login to wait for: go-librespot is masked,
+# and the key + pairing happen in the PWA (soloistd: needs-key -> needs-pair -> ok).
+if [[ $SPOTIFY_ENGINE == soloist ]]; then
+  echo "==> [8/8] Spotify (Soloist): the login happens in the PWA"
+  echo
+  echo "    Fresh box: fetch the build first —  sudo systemctl start vibb-soloist-update.service"
+  echo "    Then in the PWA's Spotify card: paste the Soloist API key, tap Pair,"
+  echo "    and pick \"$DEVICE_NAME\" under Devices in the Spotify app."
+  print_token
+  exit 0
+fi
 
 if grep -q '"username"' "$CONF_DIR/state.json" 2>/dev/null; then
   echo "==> [8/8] Already logged in to Spotify — done!"

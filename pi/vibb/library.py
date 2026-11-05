@@ -13,8 +13,11 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 
 from vibb import content, spotify, spotify_web, storytel
+from vibb import paths as _paths
+from vibb import radio as _radio
 from vibb.paths import ART_DIR, CACHE_DIR, STATE_DIR
 from vibb.spotify import is_spotify
 
@@ -76,7 +79,7 @@ def normalize_library(obj):
             order = e.get("order") or "auto"
             if order not in ORDERS:
                 raise ValueError(f"order must be one of {ORDERS}")
-            cache = e.get("cache", 0)
+            cache = e.get("cache", _default_cache(e.get("target") or ""))
             # -1 = keep all episodes offline; 0 = none; 1..100 = newest N
             if not isinstance(cache, int) or not (cache == -1 or 0 <= cache <= 100):
                 raise ValueError("cache must be -1 (all) or 0-100 (episodes "
@@ -259,6 +262,55 @@ def _sync_args_for(target, n):
 
 
 SWEEP_STAMP = os.path.join(STATE_DIR, "last-sweep.json")
+
+# A sweep in progress holds the idle auto-off (owner 2026-09-21: a batch
+# of new Storytel books must finish, on the charger or on battery above
+# a floor, whatever engine is fetching). The daemon publishes
+# sweeping() in /status; idle.py holds on it, bounded and battery-gated
+# there. Three sources, one answer: this round (our own sync children,
+# the soloist warm batch, the retry pass), and — go-librespot only —
+# the download the fork runs in the background AFTER /cache/download
+# returned, visible only as its cache dir being written.
+_SWEEP = {"active": False, "since": 0.0}
+GO_CACHE_QUIET_S = float(os.environ.get("VIBB_GO_CACHE_QUIET", 120))
+_GO_CACHE = {"at": 0.0, "val": False}
+
+
+def _go_cache_busy():
+    """go-librespot is writing its audio cache: a `.tmp` file (one per
+    track in flight, renamed into place when done) or a shard directory
+    touched within GO_CACHE_QUIET_S (the fork paces tracks 1.5-2.5 s
+    apart, so a poll can land between two files). Layout is
+    <dir>/audio/<2 hex>/<file> — ~256 shard stats, cached 30 s; never
+    walks the files. False under soloist (its pass is reported by the
+    sidecar) and when the dir is missing."""
+    if _soloist():
+        return False
+    now = time.monotonic()
+    if now - _GO_CACHE["at"] < 30.0:
+        return _GO_CACHE["val"]
+    _GO_CACHE["at"] = now
+    busy = False
+    try:
+        from vibb import sysinfo
+        root = os.path.join(sysinfo.spotify_cache_dir(), "audio")
+        with os.scandir(root) as shards:
+            for shard in shards:
+                if not shard.is_dir():
+                    continue
+                if time.time() - shard.stat().st_mtime > GO_CACHE_QUIET_S:
+                    continue
+                busy = True   # written moments ago
+                break
+    except OSError:
+        busy = False
+    _GO_CACHE["val"] = busy
+    return busy
+
+
+def sweeping():
+    """A cache sweep is fetching right now, on any engine — see _SWEEP."""
+    return bool(_SWEEP["active"]) or _go_cache_busy()
 SYNC_STAGGER_S = int(os.environ.get("VIBB_SYNC_STAGGER", 4))
 # The sweep must NEVER disturb active listening: its downloads share the
 # single 2.4GHz radio with the Spotify stream AND the A2DP link, and a
@@ -270,6 +322,11 @@ SYNC_STAGGER_S = int(os.environ.get("VIBB_SYNC_STAGGER", 4))
 # little is lost) the moment playback starts.
 BUSY_CHECK = None  # set by the daemon; None = never busy (CLI use)
 SYNC_SETTLE_S = float(os.environ.get("VIBB_SYNC_SETTLE", "15"))
+# AM-98: what playback interrupted gets ONE more try once the box has been
+# quiet this long — within this bound; otherwise the next sweep (6 h)
+SYNC_RETRY_QUIET_S = float(os.environ.get("VIBB_SYNC_RETRY_QUIET", "60"))
+SYNC_RETRY_MAX_S = float(os.environ.get("VIBB_SYNC_RETRY_MAX", str(30 * 60)))
+SYNC_RETRY_POLL_S = float(os.environ.get("VIBB_SYNC_RETRY_POLL", "5"))
 SYNC_BUSY_RECHECK_S = int(os.environ.get("VIBB_SYNC_BUSY_RECHECK", 30))
 
 
@@ -378,6 +435,124 @@ _TASKSET = shutil.which("taskset")
 # behave like before the gate.
 
 PRECACHE_STATE = os.path.join(STATE_DIR, "spotify-precache.json")
+
+
+def _soloist():
+    """The Spotify engine is soloistd (the install-time toggle)."""
+    return _paths.GO_UNIT == "vibb-soloistd"
+
+
+def _default_cache(target):
+    """AM-45: under soloist a Spotify entry warms the moment it is added
+    (owner: "warm the moment I add something"); the PWA toggle still turns
+    it off per entry. Everything else keeps today's opt-in 0."""
+    return 1 if (_soloist() and is_spotify(target)) else 0
+
+
+# --- 4d: the soloist pass, driven from here (AM-37, AM-67, AM-70) ---------
+WARM_POLL_S = float(os.environ.get("VIBB_WARM_POLL_S", "5"))
+WARM_MAX_S = float(os.environ.get("VIBB_WARM_MAX_S", str(25 * 60)))
+WARM_START = None   # set by the daemon: called when a pass starts (wifi ps off)
+
+
+def _warm_health():
+    try:
+        with urllib.request.urlopen(spotify.API + "/soloist/health", timeout=3) as r:
+            return json.loads(r.read() or b"{}")
+    except (OSError, ValueError):
+        return {}
+
+
+def _warm_entry(uri, name, target=None):
+    """One entry — see _warm_entries."""
+    return _warm_entries([(uri, name, target)]).get(uri, False)
+
+
+def _warm_entries(items, aborted=None):
+    """POST /cache/download for EVERY due Spotify entry first, then STAY with
+    the pass: one queue = one ownership of the child = one restart pair for
+    all the lists of a sweep (AM-87), not one per list. While it runs: touch
+    BUSY and the warming marker every WARM_POLL_S, abort the moment the box
+    turns audible (AM-67). The library's precache state is stamped ONLY for
+    the uris the sidecar reports done (health.warm_done, per uri; AM-70) —
+    an aborted, stalled or partial pass stays due for the next sweep.
+    Returns {uri: stamped}. `aborted` (a list) receives the (uri, name, target)
+    of every list the box's own playback interrupted (AM-98)."""
+    out = {}
+    try:
+        _radio.wait_paging_clear()
+    except Exception:
+        pass
+    pending = []
+    items = [(it[0], it[1], it[2] if len(it) > 2 else None) for it in items]
+    for uri, name, _target in items:
+        try:
+            r = json.loads(spotify.go("/cache/download", timeout=10, body={"uri": uri}) or b"{}")
+        except (OSError, ValueError) as exc:
+            log(f"warm {name}: {exc!r}")
+            out[uri] = False
+            continue
+        if r.get("done"):
+            log(f"warm {name}: already done ({r.get('warmed')} warmed)")
+            _precache_done(uri)
+            out[uri] = True
+            continue
+        log(f"warm {name}: queued")
+        pending.append((uri, name, _target))
+    if not pending:
+        return out
+    if WARM_START:
+        try:
+            WARM_START()
+        except Exception:
+            pass
+    t0 = time.monotonic()
+    budget = WARM_MAX_S * len(pending)
+    aborted_by_us = False
+    while True:
+        _radio.touch_busy()
+        _radio.touch_warming()
+        h = _warm_health()
+        if not h.get("warming"):
+            break
+        if not aborted_by_us and (_busy() or time.monotonic() - t0 > budget):
+            log("warm: box busy — aborting the pass")
+            try:
+                spotify.go("/cache/abort", timeout=25)
+            except OSError:
+                pass
+            aborted_by_us = True
+        _sync_wake.wait(WARM_POLL_S)
+        _sync_wake.clear()
+    done = h.get("warm_done") or {}
+    newrows = h.get("warm_new") or {}
+    last = h.get("warm_last") or {}
+    for uri, name, target in pending:
+        result = done.get(uri)
+        if result is None and last.get("uri") == uri:
+            result = last.get("result")          # an older sidecar: the last pass only
+        if result == "done":
+            log(f"warm {name}: done")
+            _precache_done(uri)
+            out[uri] = True
+            # AM-97: the carousel's 'new' dot for Spotify lists — the same
+            # state the podcast sync feeds; first sight is acknowledged
+            nw = newrows.get(uri) or {}
+            if target and nw.get("newest"):
+                try:
+                    _mark_new_seen(target, nw["newest"])
+                    if nw.get("added"):
+                        log(f"warm {name}: {len(nw['added'])} new row(s) — badged")
+                except Exception as exc:
+                    log(f"warm {name}: new-badge state: {exc!r}")
+        else:
+            log(f"warm {name}: {result or 'no result'} — stays due")
+            out[uri] = False
+            if aborted is not None and (aborted_by_us or (result or "").startswith("aborted")):
+                aborted.append((uri, name, target))
+    return out
+
+
 _PENDING_SNAP = {}  # uri -> snapshot observed by the due-check
 
 
@@ -400,18 +575,43 @@ def _precache_save(state):
         pass  # advisory politeness state — never break the sweep
 
 
+# AM-99: a stamp is re-asked after this long. Under go-librespot the POST is
+# fire-and-forget, so 'done' only ever meant 'queued' — a download cut by a
+# restart or a power cut never came back for immutable content, and never
+# for a playlist until it was edited. A re-ask is cheap on both engines
+# (cached tracks are skipped; soloistd answers 'done' from its ledger).
+PRECACHE_RECHECK_S = float(os.environ.get("VIBB_PRECACHE_RECHECK", str(24 * 3600)))
+
+
+def _precache_stamp(prev):
+    """(value, stamped_at) from a state entry: the new {"v","at"} shape, or
+    a legacy bare value (snapshot id / "queued") with no known age."""
+    if isinstance(prev, dict):
+        return prev.get("v"), prev.get("at")
+    return prev, None
+
+
+def _precache_fresh(prev_at):
+    return prev_at is not None and time.time() - prev_at <= PRECACHE_RECHECK_S
+
+
 def _precache_due(uri):
     state = _precache_state()
     prev = state.get(uri)
+    prev_v, prev_at = _precache_stamp(prev)
     kind = uri.split(":")[1] if uri.count(":") >= 2 else ""
-    if kind in ("album", "track", "episode", "show"):
-        return prev is None  # immutable content: queue once EVER
+    if kind == "show":
+        return True  # new episodes arrive: like a playlist, always ask (AM-99)
+    if kind in ("album", "track", "episode"):
+        # immutable content: once, then a daily re-ask (AM-99) — an unknown
+        # age (a legacy "queued" stamp) counts as due
+        return prev is None or not _precache_fresh(prev_at)
     if kind == "playlist":
         try:
             snap = spotify.snapshot(uri)
         except Exception:
             return True  # fail open — behave like before the gate
-        if snap and prev == snap:
+        if snap and prev_v == snap and _precache_fresh(prev_at):
             return False
         _PENDING_SNAP[uri] = snap
         return True
@@ -420,7 +620,7 @@ def _precache_due(uri):
 
 def _precache_done(uri):
     state = _precache_state()
-    state[uri] = _PENDING_SNAP.pop(uri, None) or "queued"
+    state[uri] = {"v": _PENDING_SNAP.pop(uri, None) or "queued", "at": time.time()}
     _precache_save(state)
 
 
@@ -508,6 +708,63 @@ def _new_prune(active_targets):
         _new_save(kept)
 
 
+def _quiet_for(quiet_s, max_s):
+    """True once the box has been NOT busy for quiet_s in a row; False when
+    max_s pass without such a stretch (the sweep then leaves it to its next
+    round). Polls with the wake event so a library save is not missed."""
+    t0 = time.monotonic()
+    quiet_since = None
+    while True:
+        if _busy():
+            quiet_since = None
+        else:
+            quiet_since = quiet_since or time.monotonic()
+            if time.monotonic() - quiet_since >= quiet_s:
+                return True
+        if time.monotonic() - t0 > max_s:
+            return False
+        _sync_wake.wait(SYNC_RETRY_POLL_S)
+        _sync_wake.clear()
+
+
+def _retry_interrupted(interrupted, warm_retry):
+    """AM-98: ONE more try, once the box has been quiet SYNC_RETRY_QUIET_S,
+    for what playback interrupted in this round — a half-downloaded episode
+    or an aborted warm pass used to wait for the next sweep, up to 6 h,
+    even when the kid pressed pause two minutes later. Bounded by
+    SYNC_RETRY_MAX_S; a second interruption goes to the next sweep."""
+    if not interrupted and not warm_retry:
+        return
+    if not _quiet_for(SYNC_RETRY_QUIET_S, SYNC_RETRY_MAX_S):
+        log("cache sweep: box stayed busy — what playback interrupted waits for the next sweep")
+        return
+    log(f"cache sweep: box quiet — retrying {len(interrupted)} sync(s) and "
+        f"{len(warm_retry)} Spotify list(s) playback interrupted")
+    for argv, mod, e, badge in interrupted:
+        while _busy():
+            _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+            _sync_wake.clear()
+        log(f"cache sweep: {e['name']} ({' '.join(argv)}) — retry")
+        try:
+            _sync_one(argv, mod=mod)
+        except SweepYield:
+            log(f"cache sweep yields to playback again ({e['name']} — next sweep)")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"cache sweep failed for {e['name']}: {exc!r}")
+        if badge:
+            try:
+                _mark_new_seen(e["target"], content.newest_episode_id(e["target"]))
+            except Exception:
+                pass
+        _sync_wake.wait(SYNC_STAGGER_S)
+        _sync_wake.clear()
+    if warm_retry:
+        while _busy():
+            _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+            _sync_wake.clear()
+        _warm_entries(warm_retry)
+
+
 def _cache_sweeper():
     # Sweeps run on battery too: a box that mostly lives off the charger
     # otherwise never syncs at all — no fresh episodes, no covers. The
@@ -524,6 +781,7 @@ def _cache_sweeper():
         while _busy():  # active listening owns the radio — hold the sweep
             _sync_wake.wait(SYNC_BUSY_RECHECK_S)
             _sync_wake.clear()
+        _SWEEP["active"], _SWEEP["since"] = True, time.monotonic()
         try:
             # First, so new playlists get covers in this very sweep.
             sync_profile_sections()
@@ -541,6 +799,8 @@ def _cache_sweeper():
             content.shrink_covers()  # one-time downscale of old full-size art
         except Exception as exc:
             log(f"cover shrink failed: {exc!r}")
+        warm_batch = []   # (uri, name) of every due Spotify list under soloist (AM-87)
+        interrupted = []  # (argv, mod, entry, badge) playback cut short this round (AM-98)
         for s in lib["sections"]:
             for e in s["entries"]:
                 n = e.get("cache") or 0
@@ -557,6 +817,11 @@ def _cache_sweeper():
                     # breaker), skips already-cached tracks, so a repeat
                     # request per sweep is cheap. Same discipline as the
                     # podcast syncs: only fires when nothing is audible.
+                    if _soloist():
+                        # 4d: every due list into ONE pass after the walk
+                        # over the library (AM-87) — one restart pair
+                        warm_batch.append((uri, e["name"], e["target"]))
+                        continue
                     while _busy():
                         _sync_wake.wait(SYNC_BUSY_RECHECK_S)
                         _sync_wake.clear()
@@ -587,7 +852,8 @@ def _cache_sweeper():
                         _sync_one(["art-heal", e["target"]])
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
-                            "abandoned — retried next sweep)")
+                            "abandoned — retried once the box is quiet)")
+                        interrupted.append((["art-heal", e["target"]], None, e, False))
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         log(f"cache sweep failed for {e['name']}: {exc!r}")
                     _sync_wake.wait(SYNC_STAGGER_S)
@@ -607,7 +873,8 @@ def _cache_sweeper():
                                   mod=storytel.__file__)
                     except SweepYield:
                         log(f"cache sweep yields to playback ({e['name']} "
-                            "abandoned — retried next sweep)")
+                            "abandoned — retried once the box is quiet)")
+                        interrupted.append((["sync", e["target"], str(n)], storytel.__file__, e, True))
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         log(f"cache sweep failed for {e['name']}: {exc!r}")
                     try:
@@ -629,7 +896,8 @@ def _cache_sweeper():
                     _sync_one(args)
                 except SweepYield:
                     log(f"cache sweep yields to playback ({e['name']} "
-                        "abandoned — retried next sweep)")
+                        "abandoned — retried once the box is quiet)")
+                    interrupted.append((args, None, e, True))
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     log(f"cache sweep failed for {e['name']}: {exc!r}")
                 # the sync wrote the fresh listing (feed.json / catalog);
@@ -641,7 +909,15 @@ def _cache_sweeper():
                     pass
                 _sync_wake.wait(SYNC_STAGGER_S)  # breathe between entries
                 _sync_wake.clear()
+        warm_retry = []
+        if warm_batch:
+            while _busy():
+                _sync_wake.wait(SYNC_BUSY_RECHECK_S)
+                _sync_wake.clear()
+            _warm_entries(warm_batch, aborted=warm_retry)
+        _retry_interrupted(interrupted, warm_retry)
         _stamp_sweep()
+        _SWEEP["active"] = False
         try:
             _precache_prune({spotify.to_uri(e["target"])
                              for s in lib["sections"] for e in s["entries"]

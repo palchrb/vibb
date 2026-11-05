@@ -75,6 +75,43 @@ assert st["spotify"]["next_artwork"] == "https://i.scdn.co/next", \
     "next_track cover must be exposed for the UI art prewarm"
 print("1b. pending_track metadata: card shows the target + next cover OK")
 
+# 1c. fork v0.2.3+: pending_track_uri is gone; EVERY load — the hold, a
+#     cold fetch, a PHONE skip no BUSY marker covers — reads track:null +
+#     buffering:true. Same hold, no 'Nothing playing'.
+daemon.go_status = lambda **_k: LIVE
+orch.status()
+daemon.go_status = lambda **_k: {"buffering": True, "stopped": False,
+                                 "paused": False}
+st = orch.status()
+assert st["title"] == "Blue Monday '88" and \
+    st["spotify"]["track"] == "Blue Monday '88", (st["title"], st["spotify"])
+assert st["spotify"]["pending_track_uri"] is None, st["spotify"]
+print("1c. trackless + buffering: card held OK")
+
+# 1d. v0.2.4: a FAILED load reads stopped (buffering may linger a read)
+#     -> that is a dead session, the card clears at once
+daemon.go_status = lambda **_k: {"buffering": True, "stopped": True}
+st = orch.status()
+assert st["spotify"]["track"] is None, \
+    f"stopped wins over buffering — no hold: {st['spotify']}"
+print("1d. buffering but stopped: no hold OK")
+
+# 1e. v0.2.4 names the target as pending_track ONLY (uri inside) — the
+#     card shows where the kid is going and pending_track_uri is derived
+daemon.go_status = lambda **_k: LIVE
+orch.status()
+daemon.go_status = lambda **_k: {
+    "buffering": True, "stopped": False,
+    "pending_track": {"uri": "spotify:track:d", "name": "Bizarre Love Triangle",
+                      "artist_names": ["New Order"], "album_name": "Substance",
+                      "duration": 401000,
+                      "album_cover_url": "https://i.scdn.co/blt"}}
+st = orch.status()
+assert st["title"] == "Bizarre Love Triangle", st["title"]
+assert st["spotify"]["pending_track_uri"] == "spotify:track:d", st["spotify"]
+assert st["artwork"] == "https://i.scdn.co/blt", st["artwork"]
+print("1e. v0.2.4 pending_track without pending_track_uri: card + uri OK")
+
 # 2. fully empty answer (transient timeout) still holds briefly (old rule)
 daemon.go_status = lambda **_k: {}
 st = orch.status()

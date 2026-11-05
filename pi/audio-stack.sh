@@ -1,0 +1,432 @@
+#!/bin/bash
+# The audio-stack toggle for install.sh (PLAN-pipewire-soloist.md §H).
+# Sourced, never run: install.sh calls the functions below in order.
+#
+#   audio_stack_peek       the same resolution, read-only (no file written)
+#   audio_stack_resolve    VIBB_AUDIO_STACK env > /etc/vibb/audio-stack > bluealsa
+#   audio_stack_packages   the apt packages the chosen stack adds
+#   audio_stack_apply      pipewire: user, dirs, the three system units, the
+#                          config fragments, bluealsa MASKED (never removed),
+#                          socket -> service -> wireplumber enabled
+#                          bluealsa: today's daemons; if pipewire units exist
+#                          this is the ROLLBACK: wireplumber -> service ->
+#                          socket disabled+masked, Debian's ALSA default
+#                          override removed, bluealsa unmasked + enabled
+#   audio_stack_route      asound.conf for the stack via `bt.py route`
+#   audio_stack_unit_env   the Environment= lines every audio client unit gets
+#
+# Everything the units and fragments contain is what passed on the bench
+# (bench/pipewire_platform_rig.sh, 2026-09-03): no RuntimeDirectory on the
+# socket-activated service (AM-1), wireplumber BindsTo/WantedBy pipewire
+# (AM-2), Nice=0 (AM-4), no PIPEWIRE_CONFIG_DIR (AM-21), the shipped
+# main-embedded profile (AM-22), find-default/find-best disabled (AM-23).
+# hw-volume is DEFAULTED, not set — see the comment at the fragment
+# (AM-35, settled from the 1.4.2 source, not the bench).
+# VIBB_FS_ROOT prefixes every path (tests).
+
+AUDIO_STACK="${AUDIO_STACK:-}"
+_AS_ROOT="${VIBB_FS_ROOT:-}"
+_AS_ETC="$_AS_ROOT/etc"
+_AS_STATE="$_AS_ROOT/var/lib/vibb"
+_AS_STACK_FILE="$_AS_ETC/vibb/audio-stack"
+_AS_SOCK=/run/pipewire/pipewire-0
+PW_USER=pipewire
+# bluez5.roles is LOCAL-centric for endpoint registration (AM-57, first
+# Zero 2026-09-05, PipeWire 1.4.2 bluez5-dbus.c): endpoint_should_be_registered()
+# gates on get_codec_profile(codec, direction) & enabled_profiles, and for
+# direction SOURCE (we send audio to the headphone) that is
+# SPA_BT_PROFILE_A2DP_SOURCE = role name "a2dp_source". AM-35 read
+# media_endpoint_to_profile() instead, which names the TRANSPORT after the
+# remote role — a different function. With [ a2dp_sink ] the box registered
+# only the phone->box endpoint and bluetoothd answered every headset connect
+# with "a2dp-sink profile connect failed: Protocol not available". Listing
+# ONLY a2dp_source still means no 0000110b sink endpoint: a phone cannot
+# stream INTO the box (MODERATE-3 holds, under the right name).
+WP_ROLES="${WP_ROLES:-a2dp_source}"
+WP_PROFILE="${WP_PROFILE:-main-embedded}"
+
+_as_say() { echo "    audio stack: $*"; }
+
+audio_stack_peek() {
+  # the same resolution as audio_stack_resolve, WITHOUT the write — for
+  # decisions that must refuse before anything is touched (the engine toggle);
+  # once resolve ran in this process its answer wins (the file is written
+  # only after a successful apply now)
+  local want="${VIBB_AUDIO_STACK:-${AUDIO_STACK:-}}"
+  if [[ -z $want && -r $_AS_STACK_FILE ]]; then
+    want="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
+  fi
+  [[ $want == pipewire ]] && echo pipewire || echo bluealsa
+}
+
+audio_stack_resolve() {
+  local want="${VIBB_AUDIO_STACK:-}"
+  if [[ -z $want && -r $_AS_STACK_FILE ]]; then
+    want="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
+  fi
+  case "$want" in
+    pipewire) AUDIO_STACK=pipewire ;;
+    ""|bluealsa) AUDIO_STACK=bluealsa ;;
+    *) echo "VIBB_AUDIO_STACK must be bluealsa or pipewire (got '$want')" >&2; return 1 ;;
+  esac
+  _as_say "$AUDIO_STACK"
+}
+
+audio_stack_recorded() {
+  # the stack the LAST successful apply recorded (bluealsa when none) — what
+  # a box in service is running right now, whatever this run asks for
+  local rec=""
+  [[ -r $_AS_STACK_FILE ]] && rec="$(tr -d '[:space:]' < "$_AS_STACK_FILE")"
+  [[ $rec == pipewire ]] && echo pipewire || echo bluealsa
+}
+
+_as_record_stack() {
+  # written only after apply succeeded (AM-95 (5)): an aborted flip used to
+  # leave a file saying 'pipewire' while bluealsa served — every reader
+  # (audio.stack(), the route, extra.sh) then took the wrong path
+  mkdir -p "$(dirname "$_AS_STACK_FILE")"
+  printf '%s\n' "$AUDIO_STACK" > "$_AS_STACK_FILE"
+  _as_say "recorded $AUDIO_STACK ($_AS_STACK_FILE)"
+}
+
+audio_stack_packages() {
+  # bluealsa's packages stay in install.sh's PKGS on BOTH stacks: masked,
+  # never removed, so an offline rollback is always possible (NEW-6)
+  [[ $AUDIO_STACK == pipewire ]] \
+    && echo "pipewire pipewire-bin pipewire-alsa wireplumber libspa-0.2-bluetooth"
+  return 0
+}
+
+audio_stack_unit_env() {
+  # PIPEWIRE_PROPS is the belt under client.conf.d's stream.properties (AM-5);
+  # VIBB_BT_GATE=transport is belt under btbus's stack check (finding j)
+  if [[ $AUDIO_STACK == pipewire ]]; then
+    cat <<EOF
+Environment=VIBB_AUDIO_STACK=pipewire
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+# quoted: systemd splits Environment= on whitespace, so unquoted this became
+# PIPEWIRE_PROPS="{" plus "Invalid environment assignment, ignoring:" for the
+# rest on every daemon-reload (first Zero 2026-09-05) — the AM-5 belt was OFF
+Environment="PIPEWIRE_PROPS={ node.dont-reconnect=true node.dont-fallback=true }"
+Environment=VIBB_BT_GATE=transport
+EOF
+  else
+    echo "Environment=VIBB_AUDIO_STACK=bluealsa"
+  fi
+}
+
+# the unit ordering vibb-bt-reconnect needs: the A2DP endpoint owner
+audio_stack_endpoint_units() {
+  [[ $AUDIO_STACK == pipewire ]] && echo "wireplumber.service" \
+    || echo "bluealsa.service bluealsad.service"
+}
+
+_as_write_units() {
+  write_if_changed "$_AS_ETC/systemd/system/pipewire.socket" <<EOF || true
+[Unit]
+Description=Vibb PipeWire (system) socket
+[Socket]
+Priority=6
+ListenStream=$_AS_SOCK
+SocketUser=$PW_USER
+SocketGroup=audio
+SocketMode=0660
+DirectoryMode=0750
+[Install]
+WantedBy=sockets.target
+EOF
+  write_if_changed "$_AS_ETC/systemd/system/pipewire.service" <<EOF || true
+[Unit]
+Description=Vibb PipeWire (system-wide, owns the I2S HAT + BT A2DP)
+Requires=pipewire.socket
+After=pipewire.socket
+[Service]
+Type=simple
+User=$PW_USER
+Group=audio
+SupplementaryGroups=bluetooth
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+# NO PIPEWIRE_CONFIG_DIR: it REPLACES the search path and hides
+# /usr/share/pipewire/pipewire.conf (bench 2026-09-03). NO RuntimeDirectory:
+# systemd removes it on every stop while the socket unit still holds the
+# listener — one crash would leave every client with ENOENT (AM-1).
+Environment=HOME=/var/lib/vibb/pipewire
+ExecStart=/usr/bin/pipewire
+Nice=0
+# the data thread at SCHED_FIFO 88 / nice -11, set by module-rt itself (what
+# RTKit grants a desktop session; no RTKit reachable from a system unit) —
+# owner 2026-09-07, AM-91: the AM-4 escalation, taken after the boot log
+# showed both daemons at normal priority on a four-core Zero
+LimitRTPRIO=95
+LimitNICE=-11
+LimitMEMLOCK=64M
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+Also=pipewire.socket
+EOF
+  write_if_changed "$_AS_ETC/systemd/system/wireplumber.service" <<EOF || true
+[Unit]
+Description=Vibb WirePlumber (system-wide session manager, bluez5 + alsa only)
+# BindsTo + WantedBy=pipewire.service: a PipeWire crash restarts BOTH — a
+# Requires= stop is a clean stop and Restart=on-failure would not fire (AM-2)
+BindsTo=pipewire.service
+After=pipewire.service dbus.service
+[Service]
+Type=simple
+User=$PW_USER
+Group=audio
+SupplementaryGroups=bluetooth
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=XDG_STATE_HOME=/var/lib/vibb/wireplumber
+Environment=XDG_CONFIG_HOME=/etc/vibb/wp-empty-config
+Environment=HOME=/var/lib/vibb/wireplumber
+# no session bus on this box: silence the spa.dbus/telephony warnings
+Environment=DBUS_SESSION_BUS_ADDRESS=disabled:
+ExecStart=/usr/bin/wireplumber -p $WP_PROFILE
+Nice=0
+LimitRTPRIO=95
+LimitNICE=-11
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=pipewire.service
+EOF
+}
+
+_AS_FRAG_CHANGED=0
+_as_write_fragments() {
+  # /run/pipewire: the socket unit creates it (DirectoryMode) owned by ROOT,
+  # and pipewire (User=$PW_USER) then cannot create pipewire-0.lock in it —
+  # 'Permission denied', exit 243/CREDENTIALS, a 2 s restart loop (first Zero
+  # boot 2026-09-05, 106 restarts in 4 min). The rig had a chown by hand
+  # (bench line 361); on a box it is tmpfiles.d, applied at sysinit, which
+  # orders before sockets.target. No RuntimeDirectory= on the service (AM-1).
+  write_if_changed "$_AS_ETC/tmpfiles.d/vibb-pipewire.conf" <<EOF || true
+d /run/pipewire 0750 $PW_USER audio -
+EOF
+  write_if_changed "$_AS_ETC/pipewire/pipewire.conf.d/10-vibb.conf" <<'EOF' || true
+# vibb: 44100 everywhere (mpv pins it, SBC runs at it) = no graph resampler;
+# a fat quantum (~46ms) = fewer wakeups on a box with no low-latency need.
+context.properties = {
+  default.clock.rate          = 44100
+  default.clock.allowed-rates = [ 44100 48000 ]
+  default.clock.quantum       = 2048
+  default.clock.min-quantum   = 1024
+  default.clock.max-quantum   = 4096
+  mem.allow-mlock             = false
+  log.level                   = 2
+}
+context.objects = [
+  # the null sink soloistd warms the cache into; costs nothing suspended
+  { factory = adapter
+    args = { factory.name = support.null-audio-sink  node.name = "vibb_null"
+             node.description = "vibb null sink (cache warming)"
+             media.class = "Audio/Sink"  audio.position = [ FL FR ]
+             monitor.channel-volumes = false  node.passive = true } }
+]
+EOF
+  write_if_changed "$_AS_ETC/pipewire/client.conf.d/10-vibb.conf" <<EOF || true
+# vibb: every libpipewire client on the box (pipewire-alsa's plugin, soloist,
+# pw-*) — a stream whose target vanishes is DESTROYED, never re-homed; a
+# stream whose target is absent at open FAILS, never lands elsewhere (I2).
+context.properties = { remote.name = "$_AS_SOCK"  mem.allow-mlock = false  log.level = 1 }
+stream.properties = {
+  node.dont-reconnect = true
+  node.dont-fallback  = true
+  node.autoconnect    = true
+}
+EOF
+  write_if_changed "$_AS_ETC/wireplumber/wireplumber.conf.d/50-vibb.conf" <<EOF && _AS_FRAG_CHANGED=1
+# vibb extends the shipped '$WP_PROFILE' profile (0.5.8: main +
+# systemwide-session + stateless — no logind, no seat monitoring, no
+# reserve-device, no portal, every *.state restore hook off). Only names
+# from the distro's own 'provides' inventory appear here.
+wireplumber.profiles = {
+  $WP_PROFILE = {
+    hardware.video-capture            = disabled
+    monitor.alsa-midi                 = disabled
+    monitor.bluez-midi                = disabled
+    hooks.default-nodes.state         = disabled
+    hooks.stream.state                = disabled
+    hooks.device.profile.state        = disabled
+    hooks.device.routes.state         = disabled
+    # AM-23, bench-proven REQUIRED: without these a TARGETLESS stream links
+    # to the default sink — i.e. the HAT. Both names real, WirePlumber
+    # starts with them off.
+    hooks.linking.target.find-default = disabled
+    hooks.linking.target.find-best    = disabled
+  }
+}
+# device.routes.default-sink-volume: WirePlumber starts every NEW sink route
+# at 0.4^3 = 0.064 (-24 dB linear gain), and with routes.state off (AM-22)
+# every sink is new on every boot. First Zero 2026-09-05: HAT 0.064, bluez
+# 0.064, under a 70% stream — "very quiet at 70". Under bluealsa there was no
+# such layer: the engine's volume was the only attenuation. 1.0 restores that;
+# vibb still never writes a node volume (I8).
+wireplumber.settings = {
+  linking.allow-moving-streams            = false
+  linking.follow-default-target           = false
+  node.stream.restore-props               = false
+  node.stream.restore-target              = false
+  device.restore-profile                  = false
+  device.restore-routes                   = false
+  bluetooth.autoswitch-to-headset-profile = false
+  bluetooth.use-persistent-storage        = false
+  device.routes.default-sink-volume       = 1.0
+}
+monitor.bluez.properties = {
+  bluez5.roles              = [ $WP_ROLES ]
+  bluez5.codecs             = [ sbc ]
+  bluez5.enable-sbc-xq      = false
+  bluez5.enable-msbc        = false
+  # bluez5.enable-hw-volume is deliberately ABSENT (AM-35). It is not an
+  # on/off switch: the docs call it "override device quirk list and enable
+  # hardware volume for devices for which it is disabled", so true would
+  # FORCE absolute volume onto headsets blacklisted for handling it badly,
+  # and false would merely decline to override. The knob that matters is
+  # the per-profile default, and 1.4.2's DEFAULT_HW_VOLUME_PROFILES
+  # already contains SPA_BT_PROFILE_A2DP_SINK — so the kid's headset
+  # keeps its own volume buttons, quirky devices stay protected, and vibb
+  # still never writes a node volume itself (I8).
+  bluez5.dummy-avrcp-player = false
+  bluez5.default.rate       = 44100
+}
+monitor.bluez.rules = [
+  { matches = [ { node.name = "~bluez_output.*" } ]
+    actions = { update-props = { session.suspend-timeout-seconds = 120  node.pause-on-idle = true } } }
+  { matches = [ { device.name = "~bluez_card.*" } ]
+    actions = { update-props = { bluez5.autoswitch-profile = false } } }
+]
+monitor.alsa.rules = [
+  { matches = [ { node.name = "~alsa_output.*" } ]
+    actions = { update-props = { session.suspend-timeout-seconds = 5  api.alsa.soft-mixer = true  node.pause-on-idle = true } } }
+]
+EOF
+  # a function's status is its LAST command's: with the fragment unchanged the
+  # 'write_if_changed && FLAG=1' list above is 1 and set -e killed install.sh
+  # silently right after the bluetooth enable (Zero, 2026-09-05, second run)
+  return 0
+}
+
+# The idle units nobody asked for (owner 2026-09-05: "så ikke disse tingene
+# ligger og bruker ressurser i bakgrunnen"):
+#  - bluealsa-aplay plays a PHONE's A2DP stream into the box. Debian enables
+#    it on bluetooth.target with Restart=on-failure and no dependency on the
+#    daemon, so under pipewire it sits restarting against a masked bluealsa.
+#    Masked on both stacks; vibb never receives audio from a phone.
+#  - Debian's pipewire packages enable PipeWire + WirePlumber in every USER
+#    session (systemd --user default.target). An ssh login would then start
+#    a SECOND WirePlumber that registers its own A2DP endpoints with BlueZ
+#    and grabs the HAT — against the system instance under pipewire, against
+#    bluealsa under bluealsa. Masked globally whenever the packages exist.
+_as_mask_idle_units() {
+  systemctl mask --now bluealsa-aplay.service >/dev/null 2>&1 || true
+  local u
+  # mpris-proxy: Debian's session bridge for desktop players registers a
+  # SECOND AVRCP player on the headset whenever someone ssh-es in; the box
+  # has vibb-mpris for that (owner 2026-09-07, AM-91)
+  for u in pipewire.socket pipewire.service pipewire-pulse.socket \
+           pipewire-pulse.service wireplumber.service filter-chain.service \
+           mpris-proxy.service; do
+    [[ -e $_AS_ROOT/usr/lib/systemd/user/$u ]] || continue
+    systemctl --global mask "$u" >/dev/null 2>&1 || true
+  done
+}
+
+audio_stack_apply() {
+  local u
+  if [[ $AUDIO_STACK == pipewire ]]; then
+    getent group bluetooth >/dev/null 2>&1 || groupadd -r bluetooth
+    id "$PW_USER" >/dev/null 2>&1 \
+      || useradd -r -M -d "/var/lib/vibb/pipewire" -s /usr/sbin/nologin -g audio -G bluetooth "$PW_USER"
+    mkdir -p "$_AS_STATE/pipewire" "$_AS_STATE/wireplumber" "$_AS_ETC/vibb/wp-empty-config"
+    chown -R "$PW_USER:audio" "$_AS_STATE/pipewire" "$_AS_STATE/wireplumber" 2>/dev/null || true
+    _as_write_units
+    _as_write_fragments
+    systemctl daemon-reload
+    # ORDER MATTERS: bring PipeWire up and PROVE it before masking
+    # bluealsa. The other way round, a failed start (a missing package, a
+    # bad unit) left the box with no A2DP endpoint at all and set -e
+    # aborted the install right there — a silent box needing ssh. This
+    # way a failure aborts with bluealsa still serving audio.
+    # the runtime dir with the right owner BEFORE the socket unit makes a
+    # root-owned one (tmpfiles.d covers every later boot)
+    [[ -n $_AS_ROOT ]] || systemd-tmpfiles --create --prefix=/run/pipewire >/dev/null 2>&1 || true
+    systemctl enable --now pipewire.socket pipewire.service wireplumber.service
+    local _try _ok=0
+    for _try in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -S $_AS_ROOT$_AS_SOCK ]] && systemctl is-active --quiet pipewire.service \
+         && systemctl is-active --quiet wireplumber.service; then
+        _ok=1; break
+      fi
+      sleep 1
+    done
+    # 'active' for one instant is not up: a pipewire that dies in its first
+    # second (the /run/pipewire owner bug) shows as active-then-failed with
+    # RestartSec=2. Hold for 3 s and look again before trusting it.
+    if [[ $_ok -eq 1 ]]; then
+      sleep 3
+      systemctl is-active --quiet pipewire.service \
+        && systemctl is-active --quiet wireplumber.service || _ok=0
+    fi
+    # a changed WirePlumber fragment (roles, codecs, rules) is read at start
+    # only: an already-running wireplumber keeps the old one until restarted
+    if [[ $_ok -eq 1 && $_AS_FRAG_CHANGED -eq 1 ]]; then
+      systemctl try-restart wireplumber.service >/dev/null 2>&1 || true
+    fi
+    if [[ $_ok -ne 1 ]]; then
+      systemctl disable --now pipewire.socket pipewire.service wireplumber.service >/dev/null 2>&1 || true
+      _as_say "PipeWire did NOT come up ($_AS_SOCK / wireplumber) — bluealsa left"
+      _as_say "untouched and still serving audio. Check: journalctl -u pipewire -u wireplumber"
+      return 1
+    fi
+    # Only now: bluealsa and PipeWire both register A2DP endpoints with
+    # BlueZ and BlueZ accepts both — undefined ownership. Mask, never
+    # remove (NEW-6), so an offline rollback is always possible.
+    for u in bluealsa.service bluealsad.service; do
+      systemctl mask --now "$u" >/dev/null 2>&1 || true
+    done
+    _as_mask_idle_units
+    _as_record_stack
+    _as_say "PipeWire system units up; bluealsa masked (rollback: VIBB_AUDIO_STACK=bluealsa ./install.sh)"
+  else
+    if [[ -e $_AS_ETC/systemd/system/pipewire.service ]]; then
+      # ROLLBACK: the socket too, or the first client revives the service
+      for u in wireplumber.service pipewire.service pipewire.socket; do
+        systemctl disable --now "$u" >/dev/null 2>&1 || true
+        systemctl mask "$u" >/dev/null 2>&1 || true
+      done
+      # Debian's pipewire-alsa maps ALSA 'default' to PipeWire; an apt
+      # upgrade may recreate this, which bt.py's asound.conf then overrides
+      rm -f "$_AS_ETC/alsa/conf.d/99-pipewire-default.conf"
+      _as_say "PipeWire units disabled + masked (rollback)"
+    fi
+    for u in bluealsa.service bluealsad.service; do
+      systemctl unmask "$u" >/dev/null 2>&1 || true
+    done
+    systemctl enable --now bluealsa.service 2>/dev/null \
+      || systemctl enable --now bluealsad.service
+    _as_mask_idle_units
+    _as_record_stack
+  fi
+}
+
+audio_stack_route() {
+  # asound.conf for the stack. pipewire: pins vibb_local to the HAT node
+  # and vibb_bt to the speaker's (or to a name that cannot exist) — needs
+  # WirePlumber up. bluealsa: today's rewrite when a speaker is known;
+  # install.sh's placeholder otherwise.
+  local py="${VIBB_BT_PY:-/usr/bin/python3 -c 'import sys; sys.path.insert(0, \"/usr/local/lib/vibb-py\"); from vibb import bt; sys.exit(bt.main())'}"
+  if [[ $AUDIO_STACK == pipewire ]]; then
+    local _try
+    for _try in 1 2 3 4 5 6 7 8 9 10; do
+      [[ -S $_AS_ROOT$_AS_SOCK ]] && break
+      sleep 1
+    done
+    : "$_try"
+  fi
+  # shellcheck disable=SC2086
+  VIBB_AUDIO_STACK="$AUDIO_STACK" eval "$py" route || _as_say "bt.py route failed — asound.conf left as is"
+}

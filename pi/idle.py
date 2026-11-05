@@ -12,6 +12,9 @@ Activity is either of:
   - hands on the box: the UI touches an advisory marker on every
     button press (paths.touch_activity), so a kid browsing the
     carousel without starting anything never has the box die mid-use.
+  - a human over ssh (a live, chatty session), and a cache sweep
+    fetching (/status.sweeping — AM-101: any engine, on the charger or
+    on battery above a floor, capped) — both hold like playback does.
 
 The timeout comes from vibbd's settings.json (idle_shutdown_min,
 re-read every cycle so the settings menu applies live; 0 = disabled).
@@ -67,6 +70,52 @@ def daemon_playing():
         return bool(boxapi.get("/status", timeout=5).get("playing"))
     except (OSError, ValueError):
         return None
+
+
+# A cache sweep holds auto-off (AM-101, owner 2026-09-21): a batch of new
+# Storytel books, a podcast backlog, a Spotify pre-cache — whatever engine
+# is fetching — must be allowed to finish instead of dying at the idle
+# limit and dribbling in over the next sessions. On the charger or on
+# battery above SWEEP_HOLD_MIN_PCT; a HARD release at SWEEP_HOLD_MAX_S so
+# a wedged or invisible sweep can never keep the box awake forever
+# (the soloist pass alone used to cap at 25 min — AM-44/69).
+SWEEP_HOLD_MAX_S = float(os.environ.get("VIBB_SWEEP_HOLD_MAX_S", str(2 * 3600)))
+SWEEP_HOLD_MIN_PCT = float(os.environ.get("VIBB_SWEEP_HOLD_MIN_PCT", "20"))
+_sweep = {"since": None}
+
+
+def battery_allows_hold():
+    """Plugged in, or the pack above the floor. A box without a PiSugar
+    (or one whose server is down) reads None everywhere and is treated as
+    mains-powered: nothing to protect."""
+    try:
+        from vibb import sysinfo
+        if sysinfo.pisugar_get("battery_power_plugged") == "true":
+            return True
+        pct = sysinfo.pisugar_get("battery")
+        if pct is None:
+            return True
+        return float(pct) >= SWEEP_HOLD_MIN_PCT
+    except (OSError, ValueError, TypeError):
+        return True
+
+
+def sweep_hold():
+    """A cache sweep is fetching (/status.sweeping — this round's syncs,
+    the soloist pass, go-librespot's background download): hold auto-off
+    like an ssh session, while the battery allows and under the cap. An
+    older daemon without the field falls back to `warming`."""
+    try:
+        st = boxapi.get("/status", timeout=5)
+        w = bool(st.get("sweeping", st.get("warming")))
+    except (OSError, ValueError, AttributeError):
+        w = False
+    if not w or not battery_allows_hold():
+        _sweep["since"] = None
+        return False
+    if _sweep["since"] is None:
+        _sweep["since"] = time.monotonic()
+    return time.monotonic() - _sweep["since"] < SWEEP_HOLD_MAX_S
 
 
 def sonos_playing():
@@ -160,6 +209,8 @@ def _cycle(idle):
             active = True  # someone is pressing buttons — in use
     if not active and ssh_active():
         active = True  # a human is on the box over ssh — hold auto-off
+    if not active and sweep_hold():
+        active = True  # a cache sweep is fetching — bounded, battery-gated
     idle = 0 if active else idle + CHECK_S
     limit = idle_minutes()
     if limit <= 0:
@@ -174,6 +225,12 @@ def _cycle(idle):
 
 
 BACKUP_MAX_S = int(os.environ.get("VIBB_IDLE_BACKUP_MAX", "180"))
+# The Soloist updater's slot on the same way down (PLAN-pipewire-soloist
+# D1/AM-50): after the backup (irreplaceable first), its own budget, and
+# backup + update < the 600 s window of the poweroff-imminent marker.
+UPDATE_MAX_S = int(os.environ.get("VIBB_IDLE_UPDATE_MAX", "120"))
+UPDATE_UNIT = os.environ.get("VIBB_SOLOIST_UPDATE_UNIT",
+                             "/etc/systemd/system/vibb-soloist-update.service")
 
 
 def _backup_before_off():
@@ -213,6 +270,17 @@ def _backup_before_off():
             timeout=BACKUP_MAX_S)
     except Exception:
         pass   # a failed backup must never block the shutdown
+    if os.path.exists(UPDATE_UNIT):
+        # soloist engine only (the unit exists only then): a zero-byte
+        # ETag check most days, a bounded download when there is a new
+        # build; the sidecar never restarts the child on this path
+        try:
+            subprocess.run(
+                ["systemctl", "start", "--wait", "vibb-soloist-update.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=UPDATE_MAX_S)
+        except Exception:
+            pass
 
 
 def main():
