@@ -2566,7 +2566,11 @@ class App:
             self.sonos = api_get("/sonos")
         except OSError:
             self.sonos = {"players": []}  # sidecar down = no sonos row
-        if self.sonos.get("players"):
+        # `known`: the cache has rooms at all. The LIST is only the rooms
+        # the last round found here (AM-104) — in a house where none did
+        # the menu still opens (the toggle must not fire instead) and
+        # the submenu says "No speakers found here" with Look again.
+        if self.sonos.get("players") or self.sonos.get("known"):
             def freshen():
                 try:
                     self.sonos = api_get("/sonos?fresh=1", timeout=8)
@@ -3197,13 +3201,16 @@ class App:
         elif self.view == "sonos":
             # stale = the fresh probe found NOBODY (cabin: home's
             # speakers still cached). The rows stay — removing rows
-            # under a finger mid-menu is the trap, and the cache's
-            # merge semantics never delete — but the hint says the
-            # truth instead of promising "play here".
+            # under a finger mid-menu is the trap, and a round only
+            # closes between opens — but the hint says the truth instead
+            # of promising "play here". Rows are the LAST ROUND's finds
+            # (AM-104): another house's rooms are gone once one closes.
             rolls = draw_list(d, "Sonos", self.current_items(),
                               self.sel, self.system,
                               hint=("No speakers answered here"
                                     if self.sonos.get("stale")
+                                    else "No speakers found here"
+                                    if not self.sonos.get("players")
                                     else "A: play here   B: back"),
                               t0=self._marquee_t0("sonos", self.sel))
         elif self.view == "extras":

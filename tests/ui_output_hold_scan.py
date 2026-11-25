@@ -8,6 +8,7 @@
      says scanning, the list is read once more after SONOS_SCAN_WAIT_S so
      the new rooms appear while the menu is still open
   3. cached rooms, fresh answer not scanning -> exactly one read, no wait
+  4. rooms known but none found HERE (AM-104) -> the menu, not the toggle
 """
 import os
 import sys
@@ -76,5 +77,21 @@ ANSWERS["/sonos?fresh=1"] = {"players": [{"uid": "RINCON_A", "name": "Stua"}]}
 app._output_action(); settle()
 assert PUSHED == ["output"] and GETS == ["/sonos", "/sonos?fresh=1"] and SLEPT == [], (GETS, SLEPT)
 print("3. cached rooms that answer: menu + one fresh read, nothing more OK")
+
+# 4. a house where NONE of the known rooms were found (AM-104): the list
+#    is empty but `known` is set — the menu opens (the toggle must never
+#    fire under a hand that expects the speaker menu), fresh=1 behind it,
+#    and the submenu hint says so instead of promising "play here"
+ANSWERS.clear(); GETS.clear(); SLEPT.clear(); PUSHED.clear(); TOGGLED.clear()
+ANSWERS["/sonos"] = {"players": [], "groups": [], "known": True}
+ANSWERS["/sonos?fresh=1"] = {"players": [], "groups": [], "known": True}
+app._output_action(); settle()
+assert PUSHED == ["output"] and TOGGLED == [], (PUSHED, TOGGLED)
+assert GETS == ["/sonos", "/sonos?fresh=1"], GETS
+_src = open(ui.__file__, encoding="utf-8").read()
+_i = _src.index('draw_list(d, "Sonos"')
+assert '"No speakers found here"' in _src[_i:_i + 600], \
+    "an empty present set must say so in the submenu hint"
+print("4. rooms known, none found here: the menu, never the toggle OK")
 
 print("\nall ui_output_hold_scan checks passed")

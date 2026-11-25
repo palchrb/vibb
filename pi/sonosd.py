@@ -24,6 +24,11 @@ Design (three-agent review 2026-08-08/09):
   multicast-over-wifi drops; direct SoCo(ip) is the owner's own proven
   path (sonos-remotes). Discovery runs on cache miss, explicit rescan,
   or a failed play — never on a timer.
+- The cache REMEMBERS every household the box has visited (uid -> ip
+  is what makes the next visit's topology call instant); the LIST the
+  picker gets is only the speakers the LAST discovery round actually
+  found (`present_at`, AM-104) — a box carried between houses showed
+  every room it had ever seen (owner 2026-11-21).
 - soco imports LAZILY on first use: always-on process, ~20 MB deferred
   until Sonos is actually used (architect lifecycle review).
 
@@ -139,26 +144,99 @@ def _save_cache(cache):
     os.replace(tmp, CACHE_FILE)
 
 
+def _reachable(ip, timeout=1.0):
+    """One TCP knock on the Sonos port before a SOAP call to a CACHED ip:
+    a speaker from another house is a dead LAN address here, and the
+    kernel's ARP retries cost ~3 s per address before SoCo even times
+    out — three home speakers made the cabin's picker wait 9 s. Bounded
+    to 1 s each; a module function so the tests can stub it."""
+    import socket
+    try:
+        with socket.create_connection((ip, 1400), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _mark_zone(cache, z, now):
+    """Merge one visible zone into the cache with this round's stamp.
+    Returns False for a bonded sub/surround (not a pickable room)."""
+    if not z.is_visible:
+        return False
+    cache["players"][z.uid] = {
+        "ip": z.ip_address, "name": z.player_name, "seen_at": now}
+    return True
+
+
+def _merge_groups(cache, groups, now):
+    """Zones merged like rescan() does (the cache never deletes a uid —
+    it is the next visit's fast path); GROUPS replace wholesale — a
+    group list is only meaningful as a snapshot of one instant."""
+    gout = []
+    for g in groups:
+        members = []
+        try:
+            coord = g.coordinator.uid
+        except Exception:
+            continue  # a group we cannot address is not offerable
+        for z in g.members:
+            try:
+                if _mark_zone(cache, z, now):
+                    members.append(z.uid)
+            except Exception as e:
+                log(f"topology: skipping a zone ({e.__class__.__name__})")
+        if members:
+            # coordinator first: the picker labels the row by it,
+            # and selecting the row selects it
+            members.sort(key=lambda u: u != coord)
+            gout.append({"coordinator": coord, "members": members})
+    cache["groups"] = gout
+    cache["topology_at"] = now
+
+
 def rescan():
-    """SSDP + zone topology via SoCo. Merges into the cache — a scan that
-    misses a speaker (wifi multicast drops) must never delete the row the
-    kid was aiming at; a play to a dead one fails cleanly instead."""
+    """One SSDP round, then the household's topology through a speaker
+    it found, so a multicast drop never hides a room that IS here.
+    Found nobody? Ask the cached ips directly (the unicast fallback for
+    the same drop) — and when nobody answers THAT either, the round
+    still closes: an empty present set is the truth about this LAN, not
+    a reason to keep showing another house's rooms (AM-104)."""
     soco = _soco()
+    now = time.time()
     found = soco.discover(timeout=3) or set()
+    groups = None   # the household through a found speaker — off the lock
+    for z in found:
+        try:
+            groups = z.all_groups
+            break
+        except Exception:
+            continue
     with _cache_lock:
         cache = _load_cache()
         for z in found:
             try:
-                if not z.is_visible:
-                    continue  # bonded surrounds/subs — not pickable rooms
-                cache["players"][z.uid] = {
-                    "ip": z.ip_address, "name": z.player_name,
-                    "seen_at": time.time()}
+                _mark_zone(cache, z, now)
             except Exception as e:
                 log(f"scan: skipping a zone ({e.__class__.__name__})")
-        cache["fetched_at"] = time.time()
+        cache["fetched_at"] = now
+        if groups is not None:
+            _merge_groups(cache, groups, now)
+        elif not found:
+            cache["groups"] = []
+        if found or groups is not None:
+            cache["present_at"] = now
+            _save_cache(cache)
+            return cache
         _save_cache(cache)
-        return cache
+    try:
+        return refresh_topology()   # unicast: the cached ips, in turn
+    except Exception:
+        with _cache_lock:
+            cache = _load_cache()
+            cache["present_at"] = now   # nobody here — say so
+            cache["groups"] = []
+            _save_cache(cache)
+            return cache
 
 
 _bg_scan = threading.Lock()   # at most one SSDP round in flight
@@ -202,16 +280,23 @@ def refresh_topology():
     topology carries fresh ips/names), so SSDP degrades to the cold-
     start fallback: empty cache, or nobody answering.
 
-    Merges zones like rescan() does (never delete the row the kid was
-    aiming at); GROUPS replace wholesale — a group list is only
-    meaningful as a snapshot of one instant. Raises when no cached
-    speaker answers; the caller serves the cache and says so."""
+    The cached ips are asked most-recently-seen first (the house we
+    are most likely still in), each after a 1 s TCP knock, so a cache
+    that remembers two houses costs ~1 s per absent speaker, not an
+    ARP timeout each. Success closes a discovery round: every zone the
+    household reports is stamped present, and the picker lists exactly
+    those (AM-104). Raises when no cached speaker answers; the caller
+    serves the cache and says so."""
     soco = _soco()
     with _cache_lock:
-        recs = sorted(_load_cache()["players"].items())
+        recs = sorted(_load_cache()["players"].items(),
+                      key=lambda kv: -(kv[1].get("seen_at") or 0))
     last_err = None
     groups = None
     for _uid, rec in recs:
+        if not _reachable(rec["ip"]):
+            last_err = last_err or OSError(f"{rec['ip']} unreachable")
+            continue
         try:
             groups = soco.SoCo(rec["ip"]).all_groups
             break
@@ -219,33 +304,11 @@ def refresh_topology():
             last_err = e
     if groups is None:
         raise last_err or RuntimeError("no cached speaker to ask")
+    now = time.time()
     with _cache_lock:
         cache = _load_cache()
-        gout = []
-        for g in groups:
-            members = []
-            try:
-                coord = g.coordinator.uid
-            except Exception:
-                continue  # a group we cannot address is not offerable
-            for z in g.members:
-                try:
-                    if not z.is_visible:
-                        continue  # bonded surrounds/subs — not rooms
-                    cache["players"][z.uid] = {
-                        "ip": z.ip_address, "name": z.player_name,
-                        "seen_at": time.time()}
-                    members.append(z.uid)
-                except Exception as e:
-                    log(f"topology: skipping a zone "
-                        f"({e.__class__.__name__})")
-            if members:
-                # coordinator first: the picker labels the row by it,
-                # and selecting the row selects it
-                members.sort(key=lambda u: u != coord)
-                gout.append({"coordinator": coord, "members": members})
-        cache["groups"] = gout
-        cache["topology_at"] = time.time()
+        _merge_groups(cache, groups, now)
+        cache["present_at"] = now
         _save_cache(cache)
         return cache
 
@@ -255,17 +318,37 @@ def players():
         return _load_cache()
 
 
+def _present(cache):
+    """The rows the last discovery round actually found. A cache no
+    round has closed yet (first run after the upgrade) lists everything
+    it has, so the Sonos row exists and the hold's own topology call
+    stamps the round."""
+    at = cache.get("present_at")
+    if at is None:
+        return dict(cache["players"])
+    return {uid: rec for uid, rec in cache["players"].items()
+            if (rec.get("seen_at") or 0) >= at}
+
+
 def players_payload(cache, stale=False, scanning=False):
     """The GET /players wire shape. uid + name only — speaker IPs are
     LAN topology and every GET is token-free by the box's SAFE rule.
     groups ride along so the picker can offer 'Stua + Kjøkken' as ONE
-    row; only multi-member groups are worth the wire."""
+    row; only multi-member groups are worth the wire. `players` is the
+    PRESENT set (AM-104); `known` says the cache has rooms at all, so
+    the picker keeps its Sonos row in a house where none answered."""
+    present = _present(cache)
+    groups = []
+    for g in cache.get("groups") or []:
+        members = [u for u in g.get("members") or [] if u in present]
+        if len(members) > 1 and g.get("coordinator") in present:
+            groups.append({"coordinator": g["coordinator"],
+                           "members": members})
     out = {"players": [
         {"uid": uid, "name": rec.get("name")}
-        for uid, rec in sorted(cache["players"].items(),
+        for uid, rec in sorted(present.items(),
                                key=lambda kv: kv[1].get("name") or "")
-    ], "groups": [g for g in cache.get("groups") or []
-                  if len(g.get("members") or []) > 1]}
+    ], "groups": groups, "known": bool(cache["players"])}
     if stale:
         out["stale"] = True  # nobody answered — this is the old cache
     if scanning:

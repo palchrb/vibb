@@ -10,7 +10,8 @@ What must hold:
 2. nobody answering raises — the endpoint then serves the cache marked
    stale, so a cabin trip shows the truth, not home's ghosts.
 3. players_payload: uid+name only (no LAN ips over a token-free GET),
-   groups only when multi-member.
+   groups only when multi-member — and only the rooms the LAST round
+   found (AM-104): the cache remembers every house, the list does not.
 4. ui._sonos_choices: a group is one row labelled coordinator-first,
    selecting it yields the COORDINATOR uid; absorbed zones don't repeat;
    solo zones unchanged; a group naming unknown uids is skipped whole.
@@ -46,8 +47,10 @@ SUB = zone("RINCON_SUB", "10.0.0.14", "Sub", visible=False)
 class FakeSoCo:
     groups = []
     fail = False
+    asked = []
 
     def __init__(self, ip):
+        FakeSoCo.asked.append(ip)
         if FakeSoCo.fail:
             raise OSError("unreachable")
         self.ip = ip
@@ -58,6 +61,7 @@ class FakeSoCo:
 
 
 sonosd._soco = lambda: types.SimpleNamespace(SoCo=FakeSoCo)
+sonosd._reachable = lambda ip, timeout=1.0: True   # the SoCo fake decides
 
 # seed the cache with ONE stale record: old ip, old name
 with open(sonosd.CACHE_FILE, "w") as f:
@@ -97,6 +101,31 @@ except OSError:
 FakeSoCo.fail = False
 print("2. unreachable household raises — cache serves marked stale OK")
 
+# 2b. the TCP knock: a cached ip nobody answers on :1400 is never asked
+#     over SOAP (an ARP timeout per absent speaker made the cabin's
+#     picker wait ~3 s each) — and most-recently-seen ips go first
+FakeSoCo.asked.clear()
+sonosd._reachable = lambda ip, timeout=1.0: False
+try:
+    sonosd.refresh_topology()
+    raise AssertionError("no reachable ip must raise")
+except OSError:
+    pass
+assert FakeSoCo.asked == [], f"unreachable ips must skip SoCo: {FakeSoCo.asked}"
+sonosd._reachable = lambda ip, timeout=1.0: ip != "10.0.0.11"
+with open(sonosd.CACHE_FILE) as f:
+    _c = json.load(f)
+_c["players"]["RINCON_A"]["seen_at"] = 5.0      # an older visit
+_c["players"]["RINCON_B"]["seen_at"] = 7.0
+_c["players"]["RINCON_C"]["seen_at"] = 9.0      # seen most recently
+with open(sonosd.CACHE_FILE, "w") as f:
+    json.dump(_c, f)
+cache = sonosd.refresh_topology()
+assert FakeSoCo.asked == ["10.0.0.13"], \
+    f"most-recently-seen reachable ip first, one call: {FakeSoCo.asked}"
+sonosd._reachable = lambda ip, timeout=1.0: True
+print("2b. the knock skips dead ips; recent ips are asked first OK")
+
 # 3. the wire shape: no ips, groups only when multi-member
 out = sonosd.players_payload(cache)
 assert all(set(p) == {"uid", "name"} for p in out["players"]), \
@@ -106,7 +135,32 @@ assert out["groups"] == [{"coordinator": "RINCON_B",
     f"solo 'groups' are noise — multi-member only: {out['groups']}"
 assert "stale" not in out
 assert sonosd.players_payload(cache, stale=True)["stale"] is True
+assert out["known"] is True
 print("3. payload: uid+name only, multi-member groups, stale flag OK")
+
+# 3b. the present set (AM-104): a room from ANOTHER house stays in the
+#     cache (uid -> ip is the next visit's fast path) but is not listed,
+#     and a group naming it loses that member; a cache no round has
+#     closed yet lists everything it has (first run after the upgrade)
+cache["players"]["RINCON_Z"] = {"ip": "10.9.0.5", "name": "Hytta",
+                                "seen_at": 1.0}
+cache["groups"].append({"coordinator": "RINCON_C",
+                        "members": ["RINCON_C", "RINCON_Z"]})
+out = sonosd.players_payload(cache)
+assert [p["uid"] for p in out["players"]] == ["RINCON_C", "RINCON_B", "RINCON_A"], \
+    f"another house's room must not be listed: {out['players']}"
+assert out["groups"] == [{"coordinator": "RINCON_B",
+                          "members": ["RINCON_B", "RINCON_A"]}], \
+    f"a group with an absent member drops it (and solo groups go): {out['groups']}"
+legacy = dict(cache); legacy.pop("present_at")
+assert len(sonosd.players_payload(legacy)["players"]) == 4, \
+    "no round closed yet -> the whole cache is listed"
+empty = {"players": {"RINCON_Z": cache["players"]["RINCON_Z"]},
+         "groups": [], "present_at": 100.0}
+out = sonosd.players_payload(empty)
+assert out["players"] == [] and out["known"] is True, out
+assert sonosd.players_payload({"players": {}})["known"] is False
+print("3b. the list is the last round's finds; known says rooms exist OK")
 
 # 4. the ui rows: one source for display AND selection
 import ui  # noqa: E402
