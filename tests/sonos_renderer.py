@@ -59,6 +59,9 @@ class FakeSidecar(BaseHTTPRequestHandler):
         FAKE["log"].append((self.path, body))
         # contract discipline: an unknown /play shape must 400 loudly
         if self.path == "/play":
+            # what the screen's /status sees DURING the hand-off
+            FAKE["at_play"] = (daemon.ORCH.sonos_idx,
+                               len(daemon.ORCH.sonos_queue))
             sys.path.insert(0, os.path.join(REPO, "tests"))
             import sonos_contract
             err = sonos_contract.check_play(body)
@@ -109,6 +112,11 @@ r = orch.play("https://podkast.example/feed.xml")
 plays = [b for p, b in FAKE["log"] if p == "/play"]
 assert SPAWNED == [], "renderer sonos must never spawn a local player"
 assert plays and plays[0]["kind"] == "url", (r, FAKE["log"])
+# the index is written WITH the queue, before the seconds-long hand-off:
+# a previous list's index outliving its queue raised IndexError in every
+# /status of that window (field 2026-11-21)
+assert FAKE["at_play"] == (0, len(orch.sonos_queue)) and orch.sonos_queue, \
+    FAKE["at_play"]
 assert orch.source == "sonos"
 print("2. play routes to the sidecar, never a local spawn OK")
 
@@ -140,6 +148,17 @@ orch.sonos_snap = dict(orch.sonos_snap, ours=False,
 st = orch.status()
 assert st["playing"] is False and st["renderer_state"] == "taken-over"
 print("3b. foreign uri reads as taken-over, not ours OK")
+
+# 3c. an index beyond the queue (the poller rebuilt a shorter one under
+#     it, or a play's hand-off is in flight) must never raise — the card
+#     just has no row to paint from (field 2026-11-21 20:55)
+_q, _i = orch.sonos_queue, orch.sonos_idx
+orch.sonos_snap = dict(orch.sonos_snap, ours=True, foreign_uri=None)
+orch.sonos_queue, orch.sonos_idx = [{"url": "u", "id": "e1", "title": "T"}], 7
+st = orch.status()
+assert st["source"] == "sonos" and st.get("episode_id") is None, st
+orch.sonos_queue, orch.sonos_idx = _q, _i
+print("3c. an index past the queue reads as no row, never a raise OK")
 
 # 4. bookmark-before-stop: switch back to the box — the position is
 #    persisted from the LAST MEASURED snapshot before /stop is posted

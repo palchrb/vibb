@@ -1720,7 +1720,12 @@ class Orchestrator:
         log(f"play [sonos] {target} ({len(playable)} episodes)")
         with self.lock:
             self.target, self.source = target, "sonos"
-            self.sonos_queue = playable
+            # queue AND index in one write: the SOAP hand-off below takes
+            # seconds, and the index of the PREVIOUS list (track 30 of a
+            # playlist) outlived its queue (19 episodes) for all of them —
+            # every /status in that window raised IndexError and the
+            # screen's play timed out (field 2026-11-21 20:55)
+            self.sonos_queue, self.sonos_idx = playable, idx
             self.sonos_kind = "url"
             self._persist()
         return self._sonos_play_entry(idx, start_s=pos)
@@ -2808,8 +2813,11 @@ class Orchestrator:
                 out["renderer_state"] = "unreachable"
                 out["position"] = self.sonos_snap.get("rel_s")
                 out["duration"] = self.sonos_snap.get("dur_s")
+            # bounds, not just presence: the poller rebuilds the queue
+            # under a live index, and status() reads without the lock
             row = (self.sonos_queue[self.sonos_idx]
-                   if self.sonos_idx is not None and self.sonos_queue
+                   if self.sonos_idx is not None
+                   and 0 <= self.sonos_idx < len(self.sonos_queue)
                    else None)
             # The card paints from OUR row whenever the index is CONFIRMED
             # (AM-102): the map is trusted, or the poller matched the
