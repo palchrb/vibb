@@ -35,7 +35,7 @@ usage: install.sh [--update] [--bluealsa|--pipewire] [--librespot|--soloist]
                 (rollback: re-run with --bluealsa)
   --librespot   Spotify engine: the go-librespot fork (default)
   --soloist     Spotify engine: Spotify's official headless client
-                (needs --pipewire; the soloistd sidecar is not built yet)
+                (needs --pipewire; key + pairing happen in the PWA)
 
 Both toggles are also settable as VIBB_AUDIO_STACK / VIBB_SPOTIFY_ENGINE,
 and both are remembered in /etc/vibb/ so a bare re-run keeps your choice.
